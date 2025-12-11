@@ -29,7 +29,7 @@ namespace MacWinControlClient
         {
             _networkClient.OnConnected += (name) => Dispatcher.Invoke(() =>
             {
-                StatusIndicator.Fill = new SolidColorBrush(Color.FromRgb(16, 124, 16)); // Green
+                StatusIndicator.Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(16, 124, 16)); // Green
                 StatusText.Text = $"Verbonden met {name}";
                 ConnectButton.Content = "Verbreek";
                 Log($"✅ Verbonden met {name}");
@@ -97,7 +97,7 @@ namespace MacWinControlClient
                     return;
                 }
 
-                StatusIndicator.Fill = new SolidColorBrush(Color.FromRgb(255, 140, 0)); // Orange
+                StatusIndicator.Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 140, 0)); // Orange
                 StatusText.Text = "Verbinden...";
                 
                 _ = _networkClient.ConnectAsync(host);
