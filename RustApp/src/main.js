@@ -244,71 +244,93 @@ function renderComputers() {
 
 function renderScreenLayout() {
     const layout = document.getElementById('screenLayout');
-    const containerWidth = 600;
-    const containerHeight = 300;
+    const containerWidth = 580;
+    const containerHeight = 280;
     
     // Initialize saved layout if needed
     if (!savedLayout) {
         savedLayout = {};
     }
     
-    // Build unified screen layout
-    // Local screens get their actual positions
-    // Remote screens are placed relative to local screens (right side by default)
-    
     let allScreens = [];
     
-    // Add local screens with their real coordinates
+    // Add local screens - normalize so primary starts at x=0
+    const localMinX = localScreens.length > 0 ? Math.min(...localScreens.map(s => s.x)) : 0;
+    const localMinY = localScreens.length > 0 ? Math.min(...localScreens.map(s => s.y)) : 0;
+    
     localScreens.forEach((s, i) => {
         const id = `local-${i}`;
         allScreens.push({
             id,
             name: s.name,
-            x: s.x,
-            y: s.y,
+            x: s.x - localMinX,  // Normalize to start at 0
+            y: s.y - localMinY,
             width: s.width,
             height: s.height,
             is_primary: s.is_primary,
             type: 'local',
             label: s.is_primary ? 'This Mac' : `Display ${i + 1}`,
-            computerType: 'local'
+            computerType: 'local',
+            draggable: false
         });
     });
     
-    // Calculate where to place remote screens (right of local by default)
-    const localBounds = getLocalBounds();
-    const defaultRemoteX = localBounds.maxX + 50;
+    // Calculate local bounds after normalization
+    const localMaxX = allScreens.length > 0 ? Math.max(...allScreens.map(s => s.x + s.width)) : 0;
+    const localMaxY = allScreens.length > 0 ? Math.max(...allScreens.map(s => s.y + s.height)) : 1080;
     
-    // Add remote screens with saved or default positions
+    // Add remote screens - place to the RIGHT of local screens by default
+    // Group by computer name
+    const remoteByComputer = {};
     remoteScreens.forEach((s, i) => {
-        const id = `remote-${s.computer_name}-${i}`;
-        
-        // Use saved position or calculate default
-        let screenX, screenY;
-        if (savedLayout[id]) {
-            screenX = savedLayout[id].x;
-            screenY = savedLayout[id].y;
-        } else {
-            // Default: place to the right of local screens
-            screenX = defaultRemoteX + s.x;
-            screenY = s.y;
-            // Auto-save default position
-            savedLayout[id] = { x: screenX, y: screenY };
+        if (!remoteByComputer[s.computer_name]) {
+            remoteByComputer[s.computer_name] = [];
         }
+        remoteByComputer[s.computer_name].push({ ...s, index: i });
+    });
+    
+    let remoteStartX = localMaxX + 100; // Gap between local and remote
+    
+    Object.entries(remoteByComputer).forEach(([computerName, screens]) => {
+        // Normalize this computer's screens
+        const minX = Math.min(...screens.map(s => s.x));
+        const minY = Math.min(...screens.map(s => s.y));
         
-        allScreens.push({
-            id,
-            name: s.name,
-            x: screenX,
-            y: screenY,
-            width: s.width,
-            height: s.height,
-            is_primary: s.is_primary,
-            type: 'remote',
-            label: s.is_primary ? s.computer_name : `${s.computer_name} ${i + 1}`,
-            computerType: s.computer_type,
-            computerName: s.computer_name
+        screens.forEach((s, idx) => {
+            const id = `remote-${computerName}-${s.index}`;
+            
+            // Check for saved position, otherwise use calculated default
+            let screenX, screenY;
+            if (savedLayout[id]) {
+                screenX = savedLayout[id].x;
+                screenY = savedLayout[id].y;
+            } else {
+                // Place right of local, normalized
+                screenX = remoteStartX + (s.x - minX);
+                screenY = s.y - minY;
+                // Save default
+                savedLayout[id] = { x: screenX, y: screenY };
+            }
+            
+            allScreens.push({
+                id,
+                name: s.name,
+                x: screenX,
+                y: screenY,
+                width: s.width,
+                height: s.height,
+                is_primary: s.is_primary,
+                type: 'remote',
+                label: s.is_primary ? computerName : `${computerName} ${idx + 1}`,
+                computerType: s.computer_type,
+                computerName: computerName,
+                draggable: true
+            });
         });
+        
+        // Move start position for next computer
+        const maxRemoteX = Math.max(...screens.map(s => s.x - minX + s.width));
+        remoteStartX += maxRemoteX + 100;
     });
     
     if (allScreens.length === 0) {
@@ -316,43 +338,52 @@ function renderScreenLayout() {
         return;
     }
     
-    // Calculate bounds & scale
-    const bounds = calculateBounds(allScreens);
+    // Calculate total bounds for scaling
+    const minX = Math.min(...allScreens.map(s => s.x));
+    const maxX = Math.max(...allScreens.map(s => s.x + s.width));
+    const minY = Math.min(...allScreens.map(s => s.y));
+    const maxY = Math.max(...allScreens.map(s => s.y + s.height));
+    const totalWidth = maxX - minX;
+    const totalHeight = maxY - minY;
+    
+    // Scale to fit container with padding
     const scale = Math.min(
-        (containerWidth - 60) / bounds.width,
-        (containerHeight - 60) / bounds.height,
-        0.15
+        (containerWidth - 40) / totalWidth,
+        (containerHeight - 50) / totalHeight,
+        0.15  // Max scale
     );
     
+    const innerWidth = totalWidth * scale;
+    const innerHeight = totalHeight * scale;
+    
     let html = `
-        <div class="screen-layout-container" id="layoutContainer" style="
+        <div class="screen-layout-container" style="
             position: relative;
             width: ${containerWidth}px;
             height: ${containerHeight}px;
             background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
             border-radius: 12px;
-            border: 2px dashed #cbd5e1;
-            overflow: visible;
+            border: 2px solid #cbd5e1;
+            overflow: hidden;
         ">
             <div class="screen-layout-inner" id="layoutInner" style="
                 position: absolute;
-                left: 50%;
-                top: 50%;
-                transform: translate(-50%, -50%);
+                left: ${(containerWidth - innerWidth) / 2}px;
+                top: ${(containerHeight - innerHeight - 20) / 2}px;
+                width: ${innerWidth}px;
+                height: ${innerHeight}px;
             ">
     `;
     
     allScreens.forEach(screen => {
-        const left = (screen.x - bounds.minX) * scale;
-        const top = (screen.y - bounds.minY) * scale;
-        const width = Math.max(screen.width * scale, 60);
-        const height = Math.max(screen.height * scale, 40);
-        
-        const isLocal = screen.type === 'local';
+        const left = (screen.x - minX) * scale;
+        const top = (screen.y - minY) * scale;
+        const width = Math.max(screen.width * scale, 50);
+        const height = Math.max(screen.height * scale, 35);
         
         // Colors
         let bgColor;
-        if (isLocal) {
+        if (screen.type === 'local') {
             bgColor = screen.is_primary ? '#f59e0b' : '#fbbf24';
         } else if (screen.computerType === 'mac') {
             bgColor = screen.is_primary ? '#ec4899' : '#f472b6';
@@ -361,8 +392,6 @@ function renderScreenLayout() {
         } else {
             bgColor = '#10b981';
         }
-        
-        const canDrag = !isLocal;
         
         html += `
             <div class="screen-box ${screen.type}" 
@@ -377,31 +406,30 @@ function renderScreenLayout() {
                     width: ${width}px;
                     height: ${height}px;
                     background: ${bgColor};
-                    border-radius: 6px;
+                    border-radius: 5px;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
                     color: white;
-                    cursor: ${canDrag ? 'grab' : 'default'};
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    cursor: ${screen.draggable ? 'grab' : 'default'};
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
                     user-select: none;
-                    font-size: 10px;
-                    ${canDrag ? 'border: 2px dashed rgba(255,255,255,0.5);' : 'border: 2px solid rgba(255,255,255,0.3);'}
-                    transition: box-shadow 0.2s, transform 0.1s;
+                    font-size: 9px;
+                    ${screen.draggable ? 'border: 2px dashed rgba(255,255,255,0.5);' : 'border: 1px solid rgba(255,255,255,0.3);'}
                  "
-                 ${canDrag ? `onmousedown="startDrag(event, '${screen.id}')"` : ''}
+                 ${screen.draggable ? `onmousedown="startDrag(event, '${screen.id}')"` : ''}
             >
-                <span style="font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">${screen.label}</span>
-                <span style="opacity: 0.8; font-size: 9px;">${screen.width}×${screen.height}</span>
+                <span style="font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90%;">${screen.label}</span>
+                <span style="opacity: 0.8; font-size: 8px;">${screen.width}×${screen.height}</span>
             </div>
         `;
     });
     
     html += `
             </div>
-            <div style="position: absolute; bottom: 6px; left: 10px; font-size: 9px; color: #64748b;">
-                🟡 Local &nbsp; 🩷 Mac &nbsp; 🔵 Windows &nbsp; (drag remote screens to position)
+            <div style="position: absolute; bottom: 5px; left: 10px; font-size: 9px; color: #64748b;">
+                🟡 Local &nbsp; 🩷 Mac &nbsp; 🔵 Windows &nbsp; (drag to reposition)
             </div>
         </div>
     `;
@@ -489,7 +517,7 @@ function endDrag(event) {
     draggedElement.style.cursor = 'grab';
     draggedElement.style.zIndex = '';
     draggedElement.style.transform = '';
-    draggedElement.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+    draggedElement.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
     draggedElement = null;
     
     document.removeEventListener('mousemove', onDrag);
