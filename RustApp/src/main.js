@@ -1,4 +1,4 @@
-// MacWinControl Frontend
+// MacWinControl Frontend - Auto-Discovery Edition
 
 const { invoke } = window.__TAURI__.core;
 
@@ -7,16 +7,55 @@ let isServer = false;
 let isConnected = false;
 let computers = [];
 let localScreens = [];
+let remoteScreens = [];
 let screenPositions = {}; // Store custom positions
+let connectionStatus = { is_connected: false, connected_to: null, discovered_peers: [] };
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     await loadSystemInfo();
     await loadLocalScreens();
+    await loadRemoteScreens();
+    await loadConnectionStatus();
     await loadComputers();
     setupNavigation();
     setupEventListeners();
+    
+    // Poll for updates
+    setInterval(loadRemoteScreens, 2000);
+    setInterval(loadConnectionStatus, 1000);
 });
+
+async function loadConnectionStatus() {
+    try {
+        connectionStatus = await invoke('get_connection_status');
+        updateConnectionUI();
+    } catch (err) {
+        console.error('Failed to load connection status:', err);
+    }
+}
+
+function updateConnectionUI() {
+    const indicator = document.getElementById('statusIndicator');
+    const statusText = document.getElementById('statusText');
+    
+    if (connectionStatus.is_connected) {
+        indicator.className = 'status-indicator connected';
+        const peer = connectionStatus.discovered_peers.find(p => p.ip === connectionStatus.connected_to);
+        statusText.textContent = peer 
+            ? `Connected to ${peer.name}` 
+            : `Connected to ${connectionStatus.connected_to}`;
+    } else if (connectionStatus.discovered_peers.length > 0) {
+        indicator.className = 'status-indicator server';
+        statusText.textContent = `Found ${connectionStatus.discovered_peers.length} peer(s), connecting...`;
+    } else {
+        indicator.className = 'status-indicator';
+        statusText.textContent = 'Searching for peers...';
+    }
+    
+    // Update peer list in UI
+    renderDiscoveredPeers();
+}
 
 async function loadSystemInfo() {
     try {
@@ -47,6 +86,18 @@ async function loadLocalScreens() {
     }
 }
 
+async function loadRemoteScreens() {
+    try {
+        remoteScreens = await invoke('get_remote_screens');
+        console.log('Remote screens:', remoteScreens);
+        if (remoteScreens.length > 0) {
+            renderScreenLayout();
+        }
+    } catch (err) {
+        console.error('Failed to load remote screens:', err);
+    }
+}
+
 function setupNavigation() {
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -60,43 +111,29 @@ function setupNavigation() {
 }
 
 function setupEventListeners() {
+    // Auto-discovery handles connection, but keep buttons for manual override
     document.getElementById('btnStartServer').addEventListener('click', async () => {
-        try {
-            await invoke('start_server');
-            updateStatus('server', 'Server Running');
-            isServer = true;
-            document.getElementById('btnStartServer').textContent = 'Server Running';
-            document.getElementById('btnStartServer').disabled = true;
-        } catch (err) {
-            alert('Failed to start server: ' + err);
-        }
+        updateStatus('server', 'Auto-Discovery Active');
+        document.getElementById('btnStartServer').textContent = 'Discovery Active';
+        document.getElementById('btnStartServer').disabled = true;
     });
     
     document.getElementById('btnConnect').addEventListener('click', async () => {
         const ip = document.getElementById('serverIp').value.trim();
-        if (!ip) { alert('Please enter an IP address'); return; }
+        if (!ip) { 
+            alert('Auto-discovery is active. Just open the app on both computers!'); 
+            return; 
+        }
+        // Manual override if needed
         try {
             await invoke('connect_to_server', { ip });
-            updateStatus('connected', 'Connected');
-            isConnected = true;
         } catch (err) {
-            alert('Connection failed: ' + err);
+            console.log('Manual connect (auto-discovery will handle it)');
         }
     });
     
     document.getElementById('btnAddComputer').addEventListener('click', async () => {
-        const name = document.getElementById('newComputerName').value.trim();
-        const ip = document.getElementById('newComputerIp').value.trim();
-        const position = document.getElementById('newComputerPosition').value;
-        if (!name || !ip) { alert('Please fill in all fields'); return; }
-        try {
-            await invoke('add_computer', { name, ip, position });
-            await loadComputers();
-            document.getElementById('newComputerName').value = '';
-            document.getElementById('newComputerIp').value = '';
-        } catch (err) {
-            alert('Failed to add computer: ' + err);
-        }
+        alert('Computers are now discovered automatically! Just open the app on both computers.');
     });
     
     document.getElementById('clipboardSync').addEventListener('change', async (e) => {
@@ -106,6 +143,43 @@ function setupEventListeners() {
             console.error('Failed to update clipboard sync:', err);
         }
     });
+    
+    // Auto-enable server mode at startup
+    setTimeout(() => {
+        document.getElementById('btnStartServer').textContent = '✓ Auto-Discovery Active';
+        document.getElementById('btnStartServer').disabled = true;
+        document.getElementById('btnStartServer').style.backgroundColor = 'var(--success)';
+    }, 500);
+}
+
+function renderDiscoveredPeers() {
+    const container = document.getElementById('computers');
+    
+    if (connectionStatus.discovered_peers.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; padding: 20px; color: var(--text-light)">
+                <p>🔍 Searching for other computers...</p>
+                <p style="font-size: 12px; margin-top: 10px;">Open MacWinControl on your other computer</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = connectionStatus.discovered_peers.map(peer => {
+        const isConnectedToPeer = connectionStatus.connected_to === peer.ip;
+        const icon = peer.computer_type === 'mac' ? '🍎' : '🪟';
+        return `
+            <div class="computer-item" style="border-left: 3px solid ${isConnectedToPeer ? 'var(--success)' : 'var(--primary)'}">
+                <div class="info">
+                    <span class="name">${icon} ${peer.name}</span>
+                    <span class="ip">${peer.ip} • ${peer.computer_type}</span>
+                </div>
+                <span style="color: ${isConnectedToPeer ? 'var(--success)' : 'var(--text-light)'}">
+                    ${isConnectedToPeer ? '✓ Connected' : 'Discovered'}
+                </span>
+            </div>
+        `;
+    }).join('');
 }
 
 function updateStatus(status, text) {
@@ -146,20 +220,43 @@ function renderComputers() {
 
 function renderScreenLayout() {
     const layout = document.getElementById('screenLayout');
-    const containerWidth = 500;
-    const containerHeight = 280;
+    const containerWidth = 600;
+    const containerHeight = 300;
     
-    // Build all screens
+    // Build all screens - local first
     let allScreens = localScreens.map((s, i) => ({
         ...s,
         id: `local-${i}`,
         type: 'local',
-        label: s.is_primary ? 'This Mac' : `Display ${i + 1}`
+        label: s.is_primary ? 'This Mac' : `Display ${i + 1}`,
+        computerType: 'local'
     }));
     
-    // Add remote computers
+    // Add remote screens from connected computers
     const localBounds = getLocalBounds();
+    let remoteOffsetX = localBounds.maxX + 200;
+    
+    remoteScreens.forEach((s, i) => {
+        allScreens.push({
+            id: `remote-${i}`,
+            name: s.name,
+            x: remoteOffsetX + s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+            is_primary: s.is_primary,
+            type: 'remote',
+            label: s.is_primary ? s.computer_name : `${s.computer_name} - ${s.name}`,
+            computerType: s.computer_type,
+            computerName: s.computer_name
+        });
+    });
+    
+    // Also add manually added computers (for backward compatibility)
     computers.forEach((c, i) => {
+        // Skip if we already have remote screens from this computer
+        if (remoteScreens.some(s => s.computer_name === c.name)) return;
+        
         let x, y;
         if (c.position === 'left') {
             x = localBounds.minX - 2100 - (i * 100);
@@ -176,24 +273,25 @@ function renderScreenLayout() {
         }
         
         allScreens.push({
-            id: `remote-${i}`,
+            id: `manual-${i}`,
             name: c.name,
             ip: c.ip,
-            x: screenPositions[`remote-${i}`]?.x ?? x,
-            y: screenPositions[`remote-${i}`]?.y ?? y,
-            width: 1920,
-            height: 1080,
-            type: 'remote',
+            x: screenPositions[`manual-${i}`]?.x ?? x,
+            y: screenPositions[`manual-${i}`]?.y ?? y,
+            width: c.screen_width || 1920,
+            height: c.screen_height || 1080,
+            type: 'manual',
             label: c.name,
-            position: c.position
+            position: c.position,
+            computerType: 'unknown'
         });
     });
     
     // Calculate bounds & scale
     const bounds = calculateBounds(allScreens);
     const scale = Math.min(
-        (containerWidth - 60) / bounds.width,
-        (containerHeight - 60) / bounds.height,
+        (containerWidth - 80) / bounds.width,
+        (containerHeight - 80) / bounds.height,
         0.12
     );
     
@@ -222,7 +320,21 @@ function renderScreenLayout() {
         const height = Math.max(screen.height * scale, 50);
         
         const isLocal = screen.type === 'local';
-        const bgColor = isLocal ? (screen.is_primary ? '#6366f1' : '#818cf8') : '#10b981';
+        const isRemote = screen.type === 'remote';
+        
+        // Colors: local=gold/purple, remote mac=pink, remote windows=blue
+        let bgColor;
+        if (isLocal) {
+            bgColor = screen.is_primary ? '#f59e0b' : '#fbbf24';  // Gold for local
+        } else if (screen.computerType === 'mac') {
+            bgColor = screen.is_primary ? '#ec4899' : '#f472b6';  // Pink for remote Mac
+        } else if (screen.computerType === 'windows') {
+            bgColor = screen.is_primary ? '#3b82f6' : '#60a5fa';  // Blue for remote Windows
+        } else {
+            bgColor = '#10b981';  // Green for unknown/manual
+        }
+        
+        const canDrag = !isLocal;
         
         html += `
             <div class="screen-box ${screen.type}" 
@@ -240,16 +352,16 @@ function renderScreenLayout() {
                     align-items: center;
                     justify-content: center;
                     color: white;
-                    cursor: ${isLocal ? 'default' : 'grab'};
+                    cursor: ${canDrag ? 'grab' : 'default'};
                     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
                     user-select: none;
-                    ${!isLocal ? 'border: 2px dashed rgba(255,255,255,0.5);' : 'border: 2px solid rgba(255,255,255,0.3);'}
+                    ${canDrag ? 'border: 2px dashed rgba(255,255,255,0.5);' : 'border: 2px solid rgba(255,255,255,0.3);'}
                  "
-                 ${!isLocal ? `onmousedown="startDrag(event, '${screen.id}')"` : ''}
+                 ${canDrag ? `onmousedown="startDrag(event, '${screen.id}')"` : ''}
             >
                 <span style="font-size: 11px; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.2);">${screen.label}</span>
                 <span style="font-size: 9px; opacity: 0.8;">${screen.width}×${screen.height}</span>
-                ${!isLocal ? `<span style="font-size: 8px; opacity: 0.7; margin-top: 2px;">📍 ${screen.position}</span>` : ''}
+                ${screen.computerType && screen.computerType !== 'local' ? `<span style="font-size: 8px; opacity: 0.7; margin-top: 2px;">${screen.computerType === 'mac' ? '🍎' : '🪟'}</span>` : ''}
             </div>
         `;
     });
@@ -257,7 +369,7 @@ function renderScreenLayout() {
     html += `
             </div>
             <div style="position: absolute; bottom: 8px; left: 12px; font-size: 10px; color: #64748b;">
-                🟣 Mac Schermen &nbsp;&nbsp; 🟢 Windows PC (versleep om positie aan te passen)
+                🟡 Lokaal &nbsp;&nbsp; 🩷 Mac &nbsp;&nbsp; 🔵 Windows &nbsp;&nbsp; (versleep om positie aan te passen)
             </div>
         </div>
     `;

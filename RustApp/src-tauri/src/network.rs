@@ -1,12 +1,58 @@
 // Network module - TCP server and client for input sharing
+// Auto-discovery via UDP broadcast - no manual IP needed!
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
+use std::net::SocketAddr;
 
-const PORT: u16 = 52525;
+const TCP_PORT: u16 = 52525;
+const UDP_PORT: u16 = 52526;
+const DISCOVERY_MAGIC: &str = "MACWINCTRL";
+
+// Global storage for received remote screens
+pub static REMOTE_SCREENS: Lazy<RwLock<Vec<ReceivedScreen>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+// Global storage for discovered peers
+pub static DISCOVERED_PEERS: Lazy<RwLock<Vec<DiscoveredPeer>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+// Connection state
+pub static IS_CONNECTED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
+pub static CONNECTED_TO: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct DiscoveredPeer {
+    pub name: String,
+    pub ip: String,
+    pub computer_type: String,
+    pub last_seen: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ReceivedScreen {
+    pub computer_name: String,
+    pub computer_type: String,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub is_primary: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ScreenData {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub is_primary: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Message {
@@ -36,16 +82,34 @@ pub struct Message {
     
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screens: Option<Vec<ScreenData>>,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_type: Option<String>,
 }
 
 impl Message {
+    pub fn hello_with_screens(name: &str, screens: Vec<ScreenData>, computer_type: &str) -> Self {
+        Message {
+            msg_type: "hello".to_string(),
+            name: Some(name.to_string()),
+            version: Some("1.0".to_string()),
+            screens: Some(screens),
+            computer_type: Some(computer_type.to_string()),
+            x: None, y: None, button: None, action: None, 
+            key_code: None, text: None,
+        }
+    }
+    
     pub fn hello(name: &str) -> Self {
         Message {
             msg_type: "hello".to_string(),
             name: Some(name.to_string()),
             version: Some("1.0".to_string()),
             x: None, y: None, button: None, action: None, 
-            key_code: None, text: None,
+            key_code: None, text: None, screens: None, computer_type: None,
         }
     }
     
@@ -56,6 +120,7 @@ impl Message {
             y: Some(y),
             button: None, action: None, key_code: None, 
             text: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
     
@@ -66,6 +131,7 @@ impl Message {
             action: Some(action.to_string()),
             x: None, y: None, key_code: None, 
             text: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
     
@@ -76,6 +142,7 @@ impl Message {
             action: Some(action.to_string()),
             x: None, y: None, button: None, 
             text: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
     
@@ -85,6 +152,7 @@ impl Message {
             text: Some(text.to_string()),
             x: None, y: None, button: None, action: None, 
             key_code: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
     
@@ -93,6 +161,7 @@ impl Message {
             msg_type: "ping".to_string(),
             x: None, y: None, button: None, action: None, 
             key_code: None, text: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
     
@@ -101,6 +170,7 @@ impl Message {
             msg_type: "pong".to_string(),
             x: None, y: None, button: None, action: None, 
             key_code: None, text: None, name: None, version: None,
+            screens: None, computer_type: None,
         }
     }
 }
@@ -135,10 +205,27 @@ async fn handle_client(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buffer = vec![0u8; 4096];
     
-    // Send hello message
+    // Send hello message with screen info
     {
         let computer_name = get_computer_name();
-        let hello = Message::hello(&computer_name);
+        let screens = crate::input::get_all_screens();
+        let screen_data: Vec<ScreenData> = screens.iter().map(|s| ScreenData {
+            name: s.name.clone(),
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+            is_primary: s.is_primary,
+        }).collect();
+        
+        #[cfg(target_os = "macos")]
+        let computer_type = "mac";
+        #[cfg(target_os = "windows")]
+        let computer_type = "windows";
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let computer_type = "other";
+        
+        let hello = Message::hello_with_screens(&computer_name, screen_data, computer_type);
         let json = serde_json::to_string(&hello)? + "\n";
         
         let mut stream = client.lock().await;
@@ -199,7 +286,30 @@ async fn handle_message(
             }
         }
         "hello" => {
-            println!("Client hello: {:?}", msg.name);
+            let name = msg.name.clone().unwrap_or_else(|| "Unknown".to_string());
+            let comp_type = msg.computer_type.clone().unwrap_or_else(|| "unknown".to_string());
+            println!("Received hello from: {} ({})", name, comp_type);
+            
+            // Store received screens
+            if let Some(screens) = &msg.screens {
+                let mut remote = REMOTE_SCREENS.write().unwrap();
+                // Remove old screens from this computer
+                remote.retain(|s| s.computer_name != name);
+                // Add new screens
+                for s in screens {
+                    remote.push(ReceivedScreen {
+                        computer_name: name.clone(),
+                        computer_type: comp_type.clone(),
+                        name: s.name.clone(),
+                        x: s.x,
+                        y: s.y,
+                        width: s.width,
+                        height: s.height,
+                        is_primary: s.is_primary,
+                    });
+                }
+                println!("Stored {} remote screens from {}", screens.len(), name);
+            }
         }
         _ => {
             println!("Unknown message type: {}", msg.msg_type);
@@ -214,15 +324,61 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStrea
     
     let client = Arc::new(Mutex::new(stream));
     
-    // Send hello
+    // Send hello with screen info
     {
         let computer_name = get_computer_name();
-        let hello = Message::hello(&computer_name);
+        let screens = crate::input::get_all_screens();
+        let screen_data: Vec<ScreenData> = screens.iter().map(|s| ScreenData {
+            name: s.name.clone(),
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+            is_primary: s.is_primary,
+        }).collect();
+        
+        #[cfg(target_os = "macos")]
+        let computer_type = "mac";
+        #[cfg(target_os = "windows")]
+        let computer_type = "windows";
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let computer_type = "other";
+        
+        let hello = Message::hello_with_screens(&computer_name, screen_data, computer_type);
         let json = serde_json::to_string(&hello)? + "\n";
         
         let mut stream = client.lock().await;
         stream.write_all(json.as_bytes()).await?;
     }
+    
+    // Start client read loop to receive messages from server
+    let client_clone = client.clone();
+    tokio::spawn(async move {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            let n = {
+                let mut stream = client_clone.lock().await;
+                match stream.read(&mut buffer).await {
+                    Ok(n) => n,
+                    Err(_) => break,
+                }
+            };
+            
+            if n == 0 {
+                println!("Disconnected from server");
+                break;
+            }
+            
+            let data = String::from_utf8_lossy(&buffer[..n]);
+            for line in data.lines() {
+                if let Ok(msg) = serde_json::from_str::<Message>(line) {
+                    if let Err(e) = handle_message(&msg, &client_clone).await {
+                        eprintln!("Error handling message: {}", e);
+                    }
+                }
+            }
+        }
+    });
     
     Ok(client)
 }
@@ -251,4 +407,161 @@ fn get_computer_name() -> String {
     {
         "Unknown".to_string()
     }
+}
+
+fn get_computer_type() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "mac" }
+    #[cfg(target_os = "windows")]
+    { "windows" }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    { "other" }
+}
+
+// ============= AUTO-DISCOVERY =============
+
+/// Start everything: TCP server + UDP broadcast + UDP listener
+/// When a peer is discovered, automatically connect
+pub async fn start_auto_discovery() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let local_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    
+    println!("🚀 Starting MacWinControl auto-discovery...");
+    println!("📍 Local IP: {}", local_ip);
+    
+    // Start TCP server
+    tokio::spawn(async {
+        if let Err(e) = start_server(TCP_PORT).await {
+            eprintln!("TCP server error: {}", e);
+        }
+    });
+    
+    // Start UDP broadcaster (announce our presence)
+    let local_ip_clone = local_ip.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_udp_broadcaster(&local_ip_clone).await {
+            eprintln!("UDP broadcaster error: {}", e);
+        }
+    });
+    
+    // Start UDP listener (discover peers)
+    let local_ip_clone2 = local_ip.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_udp_listener(&local_ip_clone2).await {
+            eprintln!("UDP listener error: {}", e);
+        }
+    });
+    
+    Ok(())
+}
+
+/// Broadcast our presence every 2 seconds
+async fn start_udp_broadcaster(local_ip: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.set_broadcast(true)?;
+    
+    let computer_name = get_computer_name();
+    let computer_type = get_computer_type();
+    
+    // Broadcast message format: MACWINCTRL|name|ip|type
+    let message = format!("{}|{}|{}|{}", DISCOVERY_MAGIC, computer_name, local_ip, computer_type);
+    
+    println!("📢 Broadcasting presence: {}", message);
+    
+    loop {
+        // Broadcast to 255.255.255.255
+        let _ = socket.send_to(message.as_bytes(), format!("255.255.255.255:{}", UDP_PORT)).await;
+        
+        // Also try common subnet broadcasts
+        if let Some(subnet) = local_ip.rsplit_once('.') {
+            let broadcast_ip = format!("{}.255", subnet.0);
+            let _ = socket.send_to(message.as_bytes(), format!("{}:{}", broadcast_ip, UDP_PORT)).await;
+        }
+        
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Listen for UDP broadcasts from other peers
+async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", UDP_PORT)).await?;
+    println!("👂 Listening for peers on UDP port {}", UDP_PORT);
+    
+    let mut buffer = [0u8; 1024];
+    
+    loop {
+        let (len, addr) = socket.recv_from(&mut buffer).await?;
+        let message = String::from_utf8_lossy(&buffer[..len]);
+        
+        // Parse: MACWINCTRL|name|ip|type
+        let parts: Vec<&str> = message.split('|').collect();
+        if parts.len() >= 4 && parts[0] == DISCOVERY_MAGIC {
+            let peer_name = parts[1].to_string();
+            let peer_ip = parts[2].to_string();
+            let peer_type = parts[3].to_string();
+            
+            // Ignore our own broadcasts
+            if peer_ip == local_ip {
+                continue;
+            }
+            
+            println!("🔍 Discovered peer: {} ({}) at {}", peer_name, peer_type, peer_ip);
+            
+            // Update discovered peers list
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            
+            {
+                let mut peers = DISCOVERED_PEERS.write().unwrap();
+                if let Some(existing) = peers.iter_mut().find(|p| p.ip == peer_ip) {
+                    existing.last_seen = now;
+                } else {
+                    peers.push(DiscoveredPeer {
+                        name: peer_name.clone(),
+                        ip: peer_ip.clone(),
+                        computer_type: peer_type.clone(),
+                        last_seen: now,
+                    });
+                }
+            }
+            
+            // Auto-connect if not already connected
+            let is_connected = *IS_CONNECTED.read().unwrap();
+            if !is_connected {
+                println!("🔗 Auto-connecting to {}...", peer_ip);
+                
+                let peer_ip_clone = peer_ip.clone();
+                tokio::spawn(async move {
+                    match connect_to_server(&peer_ip_clone, TCP_PORT).await {
+                        Ok(_) => {
+                            println!("✅ Connected to {}", peer_ip_clone);
+                            *IS_CONNECTED.write().unwrap() = true;
+                            *CONNECTED_TO.write().unwrap() = Some(peer_ip_clone);
+                        }
+                        Err(e) => {
+                            println!("❌ Failed to connect: {}", e);
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Get list of discovered peers
+pub fn get_discovered_peers() -> Vec<DiscoveredPeer> {
+    DISCOVERED_PEERS.read().unwrap().clone()
+}
+
+/// Check if connected
+pub fn is_connected() -> bool {
+    *IS_CONNECTED.read().unwrap()
+}
+
+/// Get connected peer IP
+pub fn get_connected_to() -> Option<String> {
+    CONNECTED_TO.read().unwrap().clone()
 }

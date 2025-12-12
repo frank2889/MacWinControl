@@ -17,6 +17,19 @@ pub struct AppState {
     pub computers: Vec<ComputerInfo>,
     pub local_ip: String,
     pub clipboard_sync_enabled: bool,
+    pub remote_screens: Vec<RemoteScreenInfo>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct RemoteScreenInfo {
+    pub computer_name: String,
+    pub computer_type: String,  // "mac" or "windows"
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub is_primary: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -78,31 +91,45 @@ fn get_computer_name() -> String {
 }
 
 #[tauri::command]
-async fn start_server(state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
-    {
-        let mut app_state = state.lock().map_err(|e| e.to_string())?;
-        app_state.is_server = true;
-    }
-    
-    tokio::spawn(async {
-        if let Err(e) = network::start_server(52525).await {
-            eprintln!("Server error: {}", e);
-        }
-    });
-    
-    Ok("Server started on port 52525".to_string())
+async fn start_server(_state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
+    // Auto-discovery handles everything now
+    Ok("Auto-discovery active".to_string())
 }
 
 #[tauri::command]
-async fn connect_to_server(ip: String, state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
-    match network::connect_to_server(&ip, 52525).await {
-        Ok(_) => {
-            let mut app_state = state.lock().map_err(|e| e.to_string())?;
-            app_state.is_connected = true;
-            Ok(format!("Connected to {}", ip))
-        }
-        Err(e) => Err(format!("Connection failed: {}", e))
+async fn connect_to_server(_ip: String, _state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, String> {
+    // Auto-discovery handles everything now
+    Ok("Auto-discovery will connect automatically".to_string())
+}
+
+#[tauri::command]
+fn get_connection_status() -> ConnectionStatus {
+    ConnectionStatus {
+        is_connected: network::is_connected(),
+        connected_to: network::get_connected_to(),
+        discovered_peers: network::get_discovered_peers()
+            .into_iter()
+            .map(|p| PeerInfo {
+                name: p.name,
+                ip: p.ip,
+                computer_type: p.computer_type,
+            })
+            .collect(),
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ConnectionStatus {
+    pub is_connected: bool,
+    pub connected_to: Option<String>,
+    pub discovered_peers: Vec<PeerInfo>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PeerInfo {
+    pub name: String,
+    pub ip: String,
+    pub computer_type: String,
 }
 
 #[tauri::command]
@@ -175,6 +202,29 @@ fn is_server(state: State<'_, Arc<Mutex<AppState>>>) -> bool {
     state.lock().map(|s| s.is_server).unwrap_or(false)
 }
 
+#[tauri::command]
+fn get_remote_screens(_state: State<'_, Arc<Mutex<AppState>>>) -> Vec<RemoteScreenInfo> {
+    // Read from global storage in network module
+    let remote = network::REMOTE_SCREENS.read().unwrap();
+    remote.iter().map(|s| RemoteScreenInfo {
+        computer_name: s.computer_name.clone(),
+        computer_type: s.computer_type.clone(),
+        name: s.name.clone(),
+        x: s.x,
+        y: s.y,
+        width: s.width,
+        height: s.height,
+        is_primary: s.is_primary,
+    }).collect()
+}
+
+#[tauri::command]
+fn set_remote_screens(screens: Vec<RemoteScreenInfo>, state: State<'_, Arc<Mutex<AppState>>>) -> Result<(), String> {
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    app_state.remote_screens = screens;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(Mutex::new(AppState {
@@ -184,7 +234,22 @@ pub fn run() {
         computers: Vec::new(),
         local_ip: get_local_ip(),
         clipboard_sync_enabled: true,
+        remote_screens: Vec::new(),
     }));
+
+    // Start auto-discovery in the background
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            if let Err(e) = network::start_auto_discovery().await {
+                eprintln!("Auto-discovery error: {}", e);
+            }
+            // Keep runtime alive
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            }
+        });
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -205,6 +270,9 @@ pub fn run() {
             get_mouse_position,
             is_connected,
             is_server,
+            get_remote_screens,
+            set_remote_screens,
+            get_connection_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
