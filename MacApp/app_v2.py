@@ -15,6 +15,13 @@ from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict, Callable
 from enum import Enum
 
+# Import screen layout widget
+try:
+    from screen_layout_widget import ScreenLayoutCard
+    HAS_LAYOUT_WIDGET = True
+except ImportError:
+    HAS_LAYOUT_WIDGET = False
+
 # Try to import Mac-specific modules
 try:
     from AppKit import NSScreen, NSEvent, NSPasteboard, NSStringPboardType
@@ -360,6 +367,12 @@ class InputHandler:
         self.last_y = 0
         
         self.running = False
+        self.active_edge = "right"  # Which edge triggers switch to remote
+        
+    def set_edge(self, edge: str):
+        """Set which edge triggers switch to remote"""
+        self.active_edge = edge
+        print(f"[InputHandler] Active edge set to: {edge}")
         
     def start(self):
         """Start input handling"""
@@ -369,6 +382,24 @@ class InputHandler:
     def stop(self):
         """Stop input handling"""
         self.running = False
+    
+    def _check_edge(self, x: float, y: float) -> bool:
+        """Check if mouse is at the active edge"""
+        threshold = 3
+        if self.active_edge == "right":
+            return x >= self.max_x - threshold
+        elif self.active_edge == "left":
+            return x <= self.min_x + threshold
+        elif self.active_edge == "top":
+            return y >= self.max_y - threshold  # Y is flipped on Mac
+        elif self.active_edge == "bottom":
+            return y <= self.min_y + threshold
+        return False
+    
+    def _get_opposite_edge_check(self) -> str:
+        """Get the opposite edge for returning to local"""
+        opposites = {"right": "left", "left": "right", "top": "bottom", "bottom": "top"}
+        return opposites.get(self.active_edge, "left")
     
     def _poll_loop(self):
         """Main polling loop for edge detection"""
@@ -385,10 +416,10 @@ class InputHandler:
                 x, y = loc.x, loc.y
                 
                 if not self.is_controlling_remote and not self.is_being_controlled:
-                    # Check for edge transition
+                    # Check for edge transition using dynamic edge
                     if self.network.state == ConnectionState.CONNECTED:
-                        if x >= self.max_x - 3:
-                            self._switch_to_remote(y)
+                        if self._check_edge(x, y):
+                            self._switch_to_remote(x, y)
                             CGWarpMouseCursorPosition(CGPoint(trap_x, trap_y))
                             time.sleep(0.05)
                             self.last_x = trap_x
@@ -415,8 +446,19 @@ class InputHandler:
                             "absolute": True
                         })
                         
-                        # Return to local if remote mouse goes to left edge
-                        if self.remote_x <= 0:
+                        # Return to local if remote mouse reaches opposite edge
+                        opposite = self._get_opposite_edge_check()
+                        should_return = False
+                        if opposite == "left" and self.remote_x <= 0:
+                            should_return = True
+                        elif opposite == "right" and self.remote_x >= 3840:
+                            should_return = True
+                        elif opposite == "top" and self.remote_y <= 0:
+                            should_return = True
+                        elif opposite == "bottom" and self.remote_y >= 2160:
+                            should_return = True
+                        
+                        if should_return:
                             self._switch_to_local()
                             continue
                     
@@ -433,16 +475,36 @@ class InputHandler:
             
             time.sleep(0.008)
     
-    def _switch_to_remote(self, y: float):
+    def _switch_to_remote(self, x: float, y: float):
         """Switch to controlling remote computer"""
         if self.is_controlling_remote:
             return
         
         self.is_controlling_remote = True
-        self.remote_x = 50
-        self.remote_y = int(y)
         
-        self.network.send("mode_switch", {"active": True, "x": self.remote_x, "y": self.remote_y})
+        # Set initial remote position based on active edge
+        if self.active_edge == "right":
+            self.remote_x = 50
+            self.remote_y = int(y)
+        elif self.active_edge == "left":
+            self.remote_x = 3840 - 50
+            self.remote_y = int(y)
+        elif self.active_edge == "top":
+            self.remote_x = int(x)
+            self.remote_y = 2160 - 50
+        elif self.active_edge == "bottom":
+            self.remote_x = int(x)
+            self.remote_y = 50
+        else:
+            self.remote_x = 50
+            self.remote_y = int(y)
+        
+        self.network.send("mode_switch", {
+            "active": True, 
+            "x": self.remote_x, 
+            "y": self.remote_y,
+            "edge": self.active_edge
+        })
         self.on_mode_change("remote")
     
     def _switch_to_local(self):
@@ -451,12 +513,19 @@ class InputHandler:
             return
         
         self.is_controlling_remote = False
-        self.network.send("mode_switch", {"active": False})
+        self.network.send("mode_switch", {"active": False, "edge": self.active_edge})
         self.on_mode_change("local")
         
-        # Move mouse to right edge
+        # Move mouse to the edge where Windows is
         if HAS_MAC_MODULES:
-            CGWarpMouseCursorPosition(CGPoint(self.max_x - 50, self.remote_y))
+            if self.active_edge == "right":
+                CGWarpMouseCursorPosition(CGPoint(self.max_x - 50, self.remote_y))
+            elif self.active_edge == "left":
+                CGWarpMouseCursorPosition(CGPoint(self.min_x + 50, self.remote_y))
+            elif self.active_edge == "top":
+                CGWarpMouseCursorPosition(CGPoint(self.remote_x, self.max_y - 50))
+            elif self.active_edge == "bottom":
+                CGWarpMouseCursorPosition(CGPoint(self.remote_x, self.min_y + 50))
     
     def handle_incoming_input(self, msg_type: str, payload: dict):
         """Handle input from remote computer"""
@@ -551,7 +620,7 @@ class ModernApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("MacWinControl")
-        self.root.geometry("480x640")
+        self.root.geometry("480x780")
         self.root.configure(bg=COLORS["bg"])
         self.root.resizable(False, False)
         
@@ -732,6 +801,19 @@ class ModernApp:
         )
         self.mode_hint.pack()
         
+        # Screen Layout Card
+        if HAS_LAYOUT_WIDGET:
+            self.screen_layout = ScreenLayoutCard(
+                content,
+                on_layout_change=self._on_layout_change
+            )
+            self.screen_layout.pack(fill=tk.X, pady=(0, 16))
+            
+            # Set Mac screens immediately
+            self.screen_layout.set_mac_screens(get_screens())
+        else:
+            self.screen_layout = None
+        
         # Settings bar
         settings_bar = tk.Frame(self.root, bg=COLORS["surface"], height=60)
         settings_bar.pack(fill=tk.X, side=tk.BOTTOM)
@@ -827,6 +909,36 @@ class ModernApp:
         elif msg_type == "clipboard_sync":
             if self.clipboard_var.get():
                 self.clipboard.handle_incoming(payload)
+        elif msg_type == "screen_info":
+            # Received Windows screen info - update layout
+            self.root.after(0, lambda: self._update_windows_screens(payload))
+    
+    def _update_windows_screens(self, payload: dict):
+        """Update Windows screens in layout widget"""
+        if self.screen_layout and "screens" in payload:
+            screens = payload["screens"]
+            self.screen_layout.set_windows_screens(screens)
+            print(f"[UI] Updated Windows screens: {len(screens)} display(s)")
+    
+    def _on_layout_change(self, position: str):
+        """Handle screen layout position change"""
+        print(f"[UI] Windows position changed to: {position}")
+        
+        # Update edge detection in input handler
+        if self.input_handler:
+            self.input_handler.set_edge(position)
+        
+        # Update mode hint
+        edge_text = {
+            "left": "left",
+            "right": "right", 
+            "top": "top",
+            "bottom": "bottom"
+        }.get(position, "right")
+        
+        self.mode_hint.config(
+            text=f"Move mouse to {edge_text} edge to control connected computer"
+        )
     
     def _on_peer_found(self, peer_info: dict):
         """Handle discovered peer"""
