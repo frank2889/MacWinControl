@@ -8,11 +8,35 @@ let isConnected = false;
 let computers = [];
 let localScreens = [];
 let remoteScreens = [];
-let screenPositions = {}; // Store custom positions
+let savedLayout = null;  // Saved screen positions {screenId: {x, y}}
 let connectionStatus = { is_connected: false, connected_to: null, discovered_peers: [] };
+
+// Load saved layout from localStorage
+function loadSavedLayout() {
+    try {
+        const saved = localStorage.getItem('macwincontrol_layout');
+        if (saved) {
+            savedLayout = JSON.parse(saved);
+            console.log('Loaded saved layout:', savedLayout);
+        }
+    } catch (e) {
+        console.error('Failed to load layout:', e);
+    }
+}
+
+// Save layout to localStorage
+function saveLayout() {
+    try {
+        localStorage.setItem('macwincontrol_layout', JSON.stringify(savedLayout));
+        console.log('Saved layout:', savedLayout);
+    } catch (e) {
+        console.error('Failed to save layout:', e);
+    }
+}
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
+    loadSavedLayout();
     await loadSystemInfo();
     await loadLocalScreens();
     await loadRemoteScreens();
@@ -223,76 +247,81 @@ function renderScreenLayout() {
     const containerWidth = 600;
     const containerHeight = 300;
     
-    // Build all screens - local first
-    let allScreens = localScreens.map((s, i) => ({
-        ...s,
-        id: `local-${i}`,
-        type: 'local',
-        label: s.is_primary ? 'This Mac' : `Display ${i + 1}`,
-        computerType: 'local'
-    }));
+    // Initialize saved layout if needed
+    if (!savedLayout) {
+        savedLayout = {};
+    }
     
-    // Add remote screens from connected computers
-    const localBounds = getLocalBounds();
-    let remoteOffsetX = localBounds.maxX + 200;
+    // Build unified screen layout
+    // Local screens get their actual positions
+    // Remote screens are placed relative to local screens (right side by default)
     
-    remoteScreens.forEach((s, i) => {
+    let allScreens = [];
+    
+    // Add local screens with their real coordinates
+    localScreens.forEach((s, i) => {
+        const id = `local-${i}`;
         allScreens.push({
-            id: `remote-${i}`,
+            id,
             name: s.name,
-            x: remoteOffsetX + s.x,
+            x: s.x,
             y: s.y,
             width: s.width,
             height: s.height,
             is_primary: s.is_primary,
+            type: 'local',
+            label: s.is_primary ? 'This Mac' : `Display ${i + 1}`,
+            computerType: 'local'
+        });
+    });
+    
+    // Calculate where to place remote screens (right of local by default)
+    const localBounds = getLocalBounds();
+    const defaultRemoteX = localBounds.maxX + 50;
+    
+    // Add remote screens with saved or default positions
+    remoteScreens.forEach((s, i) => {
+        const id = `remote-${s.computer_name}-${i}`;
+        
+        // Use saved position or calculate default
+        let screenX, screenY;
+        if (savedLayout[id]) {
+            screenX = savedLayout[id].x;
+            screenY = savedLayout[id].y;
+        } else {
+            // Default: place to the right of local screens
+            screenX = defaultRemoteX + s.x;
+            screenY = s.y;
+            // Auto-save default position
+            savedLayout[id] = { x: screenX, y: screenY };
+        }
+        
+        allScreens.push({
+            id,
+            name: s.name,
+            x: screenX,
+            y: screenY,
+            width: s.width,
+            height: s.height,
+            is_primary: s.is_primary,
             type: 'remote',
-            label: s.is_primary ? s.computer_name : `${s.computer_name} - ${s.name}`,
+            label: s.is_primary ? s.computer_name : `${s.computer_name} ${i + 1}`,
             computerType: s.computer_type,
             computerName: s.computer_name
         });
     });
     
-    // Also add manually added computers (for backward compatibility)
-    computers.forEach((c, i) => {
-        // Skip if we already have remote screens from this computer
-        if (remoteScreens.some(s => s.computer_name === c.name)) return;
-        
-        let x, y;
-        if (c.position === 'left') {
-            x = localBounds.minX - 2100 - (i * 100);
-            y = 0;
-        } else if (c.position === 'right') {
-            x = localBounds.maxX + 100 + (i * 100);
-            y = 0;
-        } else if (c.position === 'top') {
-            x = 0;
-            y = localBounds.minY - 1200;
-        } else {
-            x = 0;
-            y = localBounds.maxY + 100;
-        }
-        
-        allScreens.push({
-            id: `manual-${i}`,
-            name: c.name,
-            ip: c.ip,
-            x: screenPositions[`manual-${i}`]?.x ?? x,
-            y: screenPositions[`manual-${i}`]?.y ?? y,
-            width: c.screen_width || 1920,
-            height: c.screen_height || 1080,
-            type: 'manual',
-            label: c.name,
-            position: c.position,
-            computerType: 'unknown'
-        });
-    });
+    if (allScreens.length === 0) {
+        layout.innerHTML = '<p style="color: var(--text-light); text-align: center; padding: 40px;">No screens detected</p>';
+        return;
+    }
     
     // Calculate bounds & scale
     const bounds = calculateBounds(allScreens);
     const scale = Math.min(
-        (containerWidth - 80) / bounds.width,
-        (containerHeight - 80) / bounds.height,
-        0.12
+        (containerWidth - 60) / bounds.width,
+        (containerHeight - 60) / bounds.height,
+        0.15
     );
     
     let html = `
@@ -303,7 +332,7 @@ function renderScreenLayout() {
             background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
             border-radius: 12px;
             border: 2px dashed #cbd5e1;
-            overflow: hidden;
+            overflow: visible;
         ">
             <div class="screen-layout-inner" id="layoutInner" style="
                 position: absolute;
@@ -316,22 +345,21 @@ function renderScreenLayout() {
     allScreens.forEach(screen => {
         const left = (screen.x - bounds.minX) * scale;
         const top = (screen.y - bounds.minY) * scale;
-        const width = Math.max(screen.width * scale, 80);
-        const height = Math.max(screen.height * scale, 50);
+        const width = Math.max(screen.width * scale, 60);
+        const height = Math.max(screen.height * scale, 40);
         
         const isLocal = screen.type === 'local';
-        const isRemote = screen.type === 'remote';
         
-        // Colors: local=gold/purple, remote mac=pink, remote windows=blue
+        // Colors
         let bgColor;
         if (isLocal) {
-            bgColor = screen.is_primary ? '#f59e0b' : '#fbbf24';  // Gold for local
+            bgColor = screen.is_primary ? '#f59e0b' : '#fbbf24';
         } else if (screen.computerType === 'mac') {
-            bgColor = screen.is_primary ? '#ec4899' : '#f472b6';  // Pink for remote Mac
+            bgColor = screen.is_primary ? '#ec4899' : '#f472b6';
         } else if (screen.computerType === 'windows') {
-            bgColor = screen.is_primary ? '#3b82f6' : '#60a5fa';  // Blue for remote Windows
+            bgColor = screen.is_primary ? '#3b82f6' : '#60a5fa';
         } else {
-            bgColor = '#10b981';  // Green for unknown/manual
+            bgColor = '#10b981';
         }
         
         const canDrag = !isLocal;
@@ -339,6 +367,9 @@ function renderScreenLayout() {
         html += `
             <div class="screen-box ${screen.type}" 
                  data-id="${screen.id}"
+                 data-original-x="${screen.x}"
+                 data-original-y="${screen.y}"
+                 data-scale="${scale}"
                  style="
                     position: absolute;
                     left: ${left}px;
@@ -346,30 +377,31 @@ function renderScreenLayout() {
                     width: ${width}px;
                     height: ${height}px;
                     background: ${bgColor};
-                    border-radius: 8px;
+                    border-radius: 6px;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
                     color: white;
                     cursor: ${canDrag ? 'grab' : 'default'};
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
                     user-select: none;
+                    font-size: 10px;
                     ${canDrag ? 'border: 2px dashed rgba(255,255,255,0.5);' : 'border: 2px solid rgba(255,255,255,0.3);'}
+                    transition: box-shadow 0.2s, transform 0.1s;
                  "
                  ${canDrag ? `onmousedown="startDrag(event, '${screen.id}')"` : ''}
             >
-                <span style="font-size: 11px; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.2);">${screen.label}</span>
-                <span style="font-size: 9px; opacity: 0.8;">${screen.width}×${screen.height}</span>
-                ${screen.computerType && screen.computerType !== 'local' ? `<span style="font-size: 8px; opacity: 0.7; margin-top: 2px;">${screen.computerType === 'mac' ? '🍎' : '🪟'}</span>` : ''}
+                <span style="font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">${screen.label}</span>
+                <span style="opacity: 0.8; font-size: 9px;">${screen.width}×${screen.height}</span>
             </div>
         `;
     });
     
     html += `
             </div>
-            <div style="position: absolute; bottom: 8px; left: 12px; font-size: 10px; color: #64748b;">
-                🟡 Lokaal &nbsp;&nbsp; 🩷 Mac &nbsp;&nbsp; 🔵 Windows &nbsp;&nbsp; (versleep om positie aan te passen)
+            <div style="position: absolute; bottom: 6px; left: 10px; font-size: 9px; color: #64748b;">
+                🟡 Local &nbsp; 🩷 Mac &nbsp; 🔵 Windows &nbsp; (drag remote screens to position)
             </div>
         </div>
     `;
@@ -399,18 +431,21 @@ function calculateBounds(screens) {
 let draggedElement = null;
 let dragStartX = 0, dragStartY = 0;
 let elemStartX = 0, elemStartY = 0;
+let dragScale = 1;
 
 window.startDrag = function(event, screenId) {
-    if (!screenId.startsWith('remote-')) return;
-    
     const element = event.target.closest('.screen-box');
     if (!element) return;
+    
+    // Only allow dragging remote screens
+    if (screenId.startsWith('local-')) return;
     
     draggedElement = element;
     dragStartX = event.clientX;
     dragStartY = event.clientY;
     elemStartX = parseInt(element.style.left) || 0;
     elemStartY = parseInt(element.style.top) || 0;
+    dragScale = parseFloat(element.dataset.scale) || 0.1;
     
     element.style.cursor = 'grabbing';
     element.style.zIndex = '100';
@@ -434,38 +469,34 @@ function endDrag(event) {
     if (!draggedElement) return;
     
     const screenId = draggedElement.dataset.id;
-    const remoteIndex = parseInt(screenId.replace('remote-', ''));
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
     
-    // Calculate relative position to determine left/right
-    const container = document.getElementById('layoutInner');
-    const elemRect = draggedElement.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    const centerX = containerRect.left + containerRect.width / 2;
+    // Convert pixel movement back to screen coordinates
+    const origX = parseInt(draggedElement.dataset.originalX) || 0;
+    const origY = parseInt(draggedElement.dataset.originalY) || 0;
+    const newX = origX + Math.round(dx / dragScale);
+    const newY = origY + Math.round(dy / dragScale);
     
-    if (computers[remoteIndex]) {
-        computers[remoteIndex].position = elemRect.left < centerX ? 'left' : 'right';
-        // Update dropdown if visible
-        const posSelect = document.getElementById('newComputerPosition');
-        if (posSelect) posSelect.value = computers[remoteIndex].position;
-    }
+    // Save the new position
+    if (!savedLayout) savedLayout = {};
+    savedLayout[screenId] = { x: newX, y: newY };
+    saveLayout();
     
-    // Save position offset
-    screenPositions[screenId] = {
-        offsetX: parseInt(draggedElement.style.left) - elemStartX,
-        offsetY: parseInt(draggedElement.style.top) - elemStartY
-    };
+    console.log(`Moved ${screenId} to (${newX}, ${newY})`);
     
+    // Reset styles
     draggedElement.style.cursor = 'grab';
     draggedElement.style.zIndex = '';
     draggedElement.style.transform = '';
-    draggedElement.style.boxShadow = '0 2px 8px rgba(0,0,0,0.15)';
+    draggedElement.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
     draggedElement = null;
     
     document.removeEventListener('mousemove', onDrag);
     document.removeEventListener('mouseup', endDrag);
     
-    // Re-render to update position label
-    setTimeout(renderScreenLayout, 100);
+    // Re-render with new positions
+    renderScreenLayout();
 }
 
 window.removeComputer = async function(ip) {

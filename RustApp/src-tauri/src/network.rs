@@ -24,6 +24,13 @@ pub static DISCOVERED_PEERS: Lazy<RwLock<Vec<DiscoveredPeer>>> = Lazy::new(|| Rw
 pub static IS_CONNECTED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
 pub static CONNECTED_TO: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
 
+// Global client for sending messages
+pub static ACTIVE_CLIENT: Lazy<RwLock<Option<Arc<Mutex<TcpStream>>>>> = Lazy::new(|| RwLock::new(None));
+
+// Control state - which computer has mouse/keyboard control
+pub static CONTROL_ACTIVE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = we're controlling remote
+pub static BEING_CONTROLLED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = remote is controlling us
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DiscoveredPeer {
     pub name: String,
@@ -190,6 +197,11 @@ pub async fn start_server(port: u16) -> Result<(), Box<dyn std::error::Error + S
         let client = Arc::new(Mutex::new(stream));
         clients.lock().await.push(client.clone());
         
+        // Store as active client for sending messages
+        *ACTIVE_CLIENT.write().unwrap() = Some(client.clone());
+        *IS_CONNECTED.write().unwrap() = true;
+        *CONNECTED_TO.write().unwrap() = Some(addr.ip().to_string());
+        
         let clients_clone = clients.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(client, clients_clone).await {
@@ -311,6 +323,21 @@ async fn handle_message(
                 println!("Stored {} remote screens from {}", screens.len(), name);
             }
         }
+        "control_start" => {
+            // Remote is taking control of our mouse/keyboard
+            println!("🎮 Remote is taking control!");
+            *BEING_CONTROLLED.write().unwrap() = true;
+            
+            // Move mouse to the specified position
+            if let (Some(x), Some(y)) = (msg.x, msg.y) {
+                crate::input::move_mouse(x, y);
+            }
+        }
+        "control_end" => {
+            // Remote is releasing control
+            println!("🔓 Remote released control");
+            *BEING_CONTROLLED.write().unwrap() = false;
+        }
         _ => {
             println!("Unknown message type: {}", msg.msg_type);
         }
@@ -350,6 +377,9 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStrea
         let mut stream = client.lock().await;
         stream.write_all(json.as_bytes()).await?;
     }
+    
+    // Store active client for sending messages
+    *ACTIVE_CLIENT.write().unwrap() = Some(client.clone());
     
     // Start client read loop to receive messages from server
     let client_clone = client.clone();
@@ -420,7 +450,7 @@ fn get_computer_type() -> &'static str {
 
 // ============= AUTO-DISCOVERY =============
 
-/// Start everything: TCP server + UDP broadcast + UDP listener
+/// Start everything: TCP server + UDP broadcast + UDP listener + mouse tracking
 /// When a peer is discovered, automatically connect
 pub async fn start_auto_discovery() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let local_ip = local_ip_address::local_ip()
@@ -451,6 +481,11 @@ pub async fn start_auto_discovery() -> Result<(), Box<dyn std::error::Error + Se
         if let Err(e) = start_udp_listener(&local_ip_clone2).await {
             eprintln!("UDP listener error: {}", e);
         }
+    });
+    
+    // Start mouse tracking for edge detection
+    tokio::spawn(async {
+        start_mouse_tracking().await;
     });
     
     Ok(())
@@ -564,4 +599,175 @@ pub fn is_connected() -> bool {
 /// Get connected peer IP
 pub fn get_connected_to() -> Option<String> {
     CONNECTED_TO.read().unwrap().clone()
+}
+
+// ============= MOUSE TRACKING & EDGE DETECTION =============
+
+/// Start mouse tracking - monitors mouse position and handles edge transitions
+pub async fn start_mouse_tracking() {
+    println!("🖱️ Starting mouse tracking...");
+    
+    let mut last_pos = (0i32, 0i32);
+    let edge_threshold = 2;  // pixels from edge to trigger transition
+    
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;  // ~120 Hz
+        
+        // Read all state upfront to avoid holding locks across await
+        let is_connected = *IS_CONNECTED.read().unwrap();
+        let being_controlled = *BEING_CONTROLLED.read().unwrap();
+        let control_active = *CONTROL_ACTIVE.read().unwrap();
+        
+        // Skip if not connected
+        if !is_connected {
+            continue;
+        }
+        
+        // Skip if we're being controlled (remote has our mouse)
+        if being_controlled {
+            continue;
+        }
+        
+        let (mx, my) = crate::input::get_mouse_position();
+        
+        // If position changed
+        if mx != last_pos.0 || my != last_pos.1 {
+            last_pos = (mx, my);
+            
+            // If we're controlling remote, send mouse position
+            if control_active {
+                send_mouse_to_remote(mx, my).await;
+            } else {
+                // Check for edge transition
+                check_edge_transition(mx, my, edge_threshold).await;
+            }
+        }
+    }
+}
+
+async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
+    let screens = crate::input::get_all_screens();
+    if screens.is_empty() { return; }
+    
+    // Find current screen bounds
+    let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+    let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+    let total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+    let total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+    
+    // Get remote screens
+    let remote_screens = REMOTE_SCREENS.read().unwrap().clone();
+    if remote_screens.is_empty() { return; }
+    
+    // Check edges
+    let at_right_edge = mx >= total_max_x - threshold;
+    let at_left_edge = mx <= total_min_x + threshold;
+    let at_top_edge = my <= total_min_y + threshold;
+    let at_bottom_edge = my >= total_max_y - threshold;
+    
+    if at_right_edge || at_left_edge || at_top_edge || at_bottom_edge {
+        println!("🎯 Edge detected! Transitioning control to remote...");
+        
+        // Calculate starting position on remote
+        let (remote_x, remote_y) = if at_right_edge {
+            // Enter remote from left side
+            let remote_min_x = remote_screens.iter().map(|s| s.x).min().unwrap_or(0);
+            (remote_min_x + 10, my)
+        } else if at_left_edge {
+            // Enter remote from right side  
+            let remote_max_x = remote_screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+            (remote_max_x - 10, my)
+        } else if at_top_edge {
+            (mx, 10)
+        } else {
+            let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+            (mx, remote_max_y - 10)
+        };
+        
+        // Take control of remote
+        *CONTROL_ACTIVE.write().unwrap() = true;
+        
+        // Send control_start message
+        send_control_message("control_start", remote_x, remote_y).await;
+        
+        // Move local mouse to edge (so it stays there)
+        let edge_x = if at_right_edge { total_max_x - 1 } else if at_left_edge { total_min_x + 1 } else { mx };
+        let edge_y = if at_top_edge { total_min_y + 1 } else if at_bottom_edge { total_max_y - 1 } else { my };
+        crate::input::move_mouse(edge_x, edge_y);
+    }
+}
+
+async fn send_mouse_to_remote(x: i32, y: i32) {
+    // Clone the client outside of async context to avoid Send issues
+    let client = {
+        ACTIVE_CLIENT.read().unwrap().clone()
+    };
+    
+    if let Some(client) = client {
+        let msg = Message::mouse_move(x, y);
+        let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+        let mut stream = client.lock().await;
+        let _ = stream.write_all(json.as_bytes()).await;
+    }
+}
+
+async fn send_control_message(msg_type: &str, x: i32, y: i32) {
+    // Clone the client outside of async context
+    let client = {
+        ACTIVE_CLIENT.read().unwrap().clone()
+    };
+    
+    if let Some(client) = client {
+        let msg = Message {
+            msg_type: msg_type.to_string(),
+            x: Some(x),
+            y: Some(y),
+            button: None, action: None, key_code: None,
+            text: None, name: None, version: None,
+            screens: None, computer_type: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+        let mut stream = client.lock().await;
+        let _ = stream.write_all(json.as_bytes()).await;
+    }
+}
+
+/// Send keyboard event to remote
+pub async fn send_key_to_remote(key_code: u32, action: &str) {
+    let is_active = *CONTROL_ACTIVE.read().unwrap();
+    if !is_active { return; }
+    
+    let client = {
+        ACTIVE_CLIENT.read().unwrap().clone()
+    };
+    
+    if let Some(client) = client {
+        let msg = Message::key_event(key_code, action);
+        let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+        let mut stream = client.lock().await;
+        let _ = stream.write_all(json.as_bytes()).await;
+    }
+}
+
+/// Send mouse click to remote
+pub async fn send_click_to_remote(button: &str, action: &str) {
+    let is_active = *CONTROL_ACTIVE.read().unwrap();
+    if !is_active { return; }
+    
+    let client = {
+        ACTIVE_CLIENT.read().unwrap().clone()
+    };
+    
+    if let Some(client) = client {
+        let msg = Message::mouse_click(button, action);
+        let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+        let mut stream = client.lock().await;
+        let _ = stream.write_all(json.as_bytes()).await;
+    }
+}
+
+/// Release control back to local
+pub fn release_control() {
+    *CONTROL_ACTIVE.write().unwrap() = false;
+    println!("🔓 Control released back to local");
 }
