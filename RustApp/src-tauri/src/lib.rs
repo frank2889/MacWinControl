@@ -225,6 +225,27 @@ fn set_remote_screens(screens: Vec<RemoteScreenInfo>, state: State<'_, Arc<Mutex
     Ok(())
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct DebugInfoResponse {
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+    pub screen_bounds: String,
+    pub edge_status: String,
+    pub last_update: u64,
+}
+
+#[tauri::command]
+fn get_debug_info() -> DebugInfoResponse {
+    let debug = network::get_debug_info();
+    DebugInfoResponse {
+        mouse_x: debug.mouse_x,
+        mouse_y: debug.mouse_y,
+        screen_bounds: debug.screen_bounds,
+        edge_status: debug.edge_status,
+        last_update: debug.last_update,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(Mutex::new(AppState {
@@ -273,6 +294,7 @@ pub fn run() {
             get_remote_screens,
             set_remote_screens,
             get_connection_status,
+            get_debug_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

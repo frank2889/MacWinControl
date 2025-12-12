@@ -48,6 +48,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Poll for updates
     setInterval(loadRemoteScreens, 2000);
     setInterval(loadConnectionStatus, 1000);
+    setInterval(loadDebugInfo, 500);  // Debug info polling
 });
 
 async function loadConnectionStatus() {
@@ -119,6 +120,18 @@ async function loadRemoteScreens() {
         }
     } catch (err) {
         console.error('Failed to load remote screens:', err);
+    }
+}
+
+async function loadDebugInfo() {
+    try {
+        const debug = await invoke('get_debug_info');
+        document.getElementById('debugMousePos').textContent = `(${debug.mouse_x}, ${debug.mouse_y})`;
+        document.getElementById('debugScreenBounds').textContent = debug.screen_bounds || '-';
+        document.getElementById('debugEdgeStatus').textContent = debug.edge_status || '-';
+        document.getElementById('debugRemoteScreens').textContent = remoteScreens.length.toString();
+    } catch (err) {
+        // Silently ignore
     }
 }
 

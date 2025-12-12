@@ -31,6 +31,18 @@ pub static ACTIVE_CLIENT: Lazy<RwLock<Option<Arc<Mutex<TcpStream>>>>> = Lazy::ne
 pub static CONTROL_ACTIVE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = we're controlling remote
 pub static BEING_CONTROLLED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = remote is controlling us
 
+// Debug state for UI
+pub static DEBUG_INFO: Lazy<RwLock<DebugInfo>> = Lazy::new(|| RwLock::new(DebugInfo::default()));
+
+#[derive(Clone, Serialize, Debug, Default)]
+pub struct DebugInfo {
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+    pub screen_bounds: String,
+    pub edge_status: String,
+    pub last_update: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DiscoveredPeer {
     pub name: String,
@@ -601,6 +613,11 @@ pub fn get_connected_to() -> Option<String> {
     CONNECTED_TO.read().unwrap().clone()
 }
 
+/// Get debug info for UI
+pub fn get_debug_info() -> DebugInfo {
+    DEBUG_INFO.read().unwrap().clone()
+}
+
 // ============= MOUSE TRACKING & EDGE DETECTION =============
 
 /// Start mouse tracking - monitors mouse position and handles edge transitions
@@ -609,6 +626,7 @@ pub async fn start_mouse_tracking() {
     
     let mut last_pos = (0i32, 0i32);
     let edge_threshold = 2;  // pixels from edge to trigger transition
+    let mut debug_counter = 0u32;
     
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;  // ~120 Hz
@@ -617,6 +635,44 @@ pub async fn start_mouse_tracking() {
         let is_connected = *IS_CONNECTED.read().unwrap();
         let being_controlled = *BEING_CONTROLLED.read().unwrap();
         let control_active = *CONTROL_ACTIVE.read().unwrap();
+        
+        let (mx, my) = crate::input::get_mouse_position();
+        
+        // Update debug info every ~0.5 seconds (every 60 iterations at 120Hz)
+        debug_counter += 1;
+        if debug_counter >= 60 {
+            debug_counter = 0;
+            let screens = crate::input::get_all_screens();
+            let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+            let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+            let total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+            let total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+            
+            let edge_status = if !is_connected {
+                "Not connected".to_string()
+            } else if being_controlled {
+                "Being controlled by remote".to_string()
+            } else if control_active {
+                "Controlling remote".to_string()
+            } else {
+                format!("Watching edges (R:{}, L:{}, T:{}, B:{})",
+                    mx >= total_max_x - edge_threshold,
+                    mx <= total_min_x + edge_threshold,
+                    my <= total_min_y + edge_threshold,
+                    my >= total_max_y - edge_threshold
+                )
+            };
+            
+            let mut debug = DEBUG_INFO.write().unwrap();
+            debug.mouse_x = mx;
+            debug.mouse_y = my;
+            debug.screen_bounds = format!("x:[{},{}] y:[{},{}]", total_min_x, total_max_x, total_min_y, total_max_y);
+            debug.edge_status = edge_status;
+            debug.last_update = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
         
         // Skip if not connected
         if !is_connected {
@@ -627,8 +683,6 @@ pub async fn start_mouse_tracking() {
         if being_controlled {
             continue;
         }
-        
-        let (mx, my) = crate::input::get_mouse_position();
         
         // If position changed
         if mx != last_pos.0 || my != last_pos.1 {
