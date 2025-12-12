@@ -1,0 +1,252 @@
+<Window x:Class="MacWinControlClient.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MacWinControl" 
+        Height="600" Width="800"
+        MinHeight="500" MinWidth="600"
+        Background="#f8fafc"
+        WindowStartupLocation="CenterScreen">
+    
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Styles/ModernTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        
+        <!-- Sidebar -->
+        <Border Grid.Column="0" Background="White" BorderBrush="#e2e8f0" BorderThickness="0,0,1,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                
+                <!-- Logo -->
+                <StackPanel Grid.Row="0" Margin="20,24,20,20">
+                    <TextBlock Text="MacWinControl" FontSize="18" FontWeight="Bold" Foreground="#0f172a"/>
+                    <TextBlock Text="v2.0.0" FontSize="11" Foreground="#64748b" Margin="0,4,0,0"/>
+                </StackPanel>
+                
+                <!-- Navigation -->
+                <StackPanel Grid.Row="1" Margin="12,0">
+                    <Button x:Name="NavConnection" Content="🔗  Connection" Style="{StaticResource SecondaryButton}" 
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Margin="0,4" Click="NavConnection_Click"/>
+                    <Button x:Name="NavSettings" Content="⚙️  Settings" Style="{StaticResource SecondaryButton}" 
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Margin="0,4" Click="NavSettings_Click"/>
+                    <Button x:Name="NavClipboard" Content="📋  Clipboard" Style="{StaticResource SecondaryButton}" 
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Margin="0,4" Click="NavClipboard_Click"/>
+                    <Button x:Name="NavScreens" Content="🖥️  Screens" Style="{StaticResource SecondaryButton}" 
+                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                            Margin="0,4" Click="NavScreens_Click"/>
+                </StackPanel>
+                
+                <!-- Status Panel -->
+                <Border Grid.Row="3" Margin="12,12" Style="{StaticResource Card}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#64748b" Margin="0,0,8,0"/>
+                            <TextBlock x:Name="StatusText" Text="Disconnected" FontSize="13" Foreground="#0f172a"/>
+                        </StackPanel>
+                        <TextBlock x:Name="StatusDetail" Text="Not connected to Mac" FontSize="11" 
+                                   Foreground="#64748b" Margin="18,4,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+        
+        <!-- Main Content Area -->
+        <Grid Grid.Column="1" Margin="24">
+            <!-- Connection Tab -->
+            <Grid x:Name="ConnectionTab">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <!-- Header -->
+                <StackPanel Grid.Row="0" Margin="0,0,0,24">
+                    <TextBlock Text="Connection" FontSize="24" FontWeight="Bold" Foreground="#0f172a"/>
+                    <TextBlock Text="Connect to your Mac to share mouse and keyboard" FontSize="14" 
+                               Foreground="#64748b" Margin="0,8,0,0"/>
+                </StackPanel>
+                
+                <!-- Connection Form -->
+                <Border Grid.Row="1" Style="{StaticResource Card}" VerticalAlignment="Top">
+                    <StackPanel>
+                        <TextBlock Text="Mac IP Address" FontSize="13" FontWeight="SemiBold" 
+                                   Foreground="#0f172a" Margin="0,0,0,8"/>
+                        <TextBox x:Name="IpAddressInput" Style="{StaticResource ModernTextBox}" 
+                                 Text="192.168.178.105" Margin="0,0,0,16"/>
+                        
+                        <TextBlock Text="Port" FontSize="13" FontWeight="SemiBold" 
+                                   Foreground="#0f172a" Margin="0,0,0,8"/>
+                        <TextBox x:Name="PortInput" Style="{StaticResource ModernTextBox}" 
+                                 Text="52525" Margin="0,0,0,24"/>
+                        
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="ConnectButton" Content="Connect" Style="{StaticResource PrimaryButton}"
+                                    Click="ConnectButton_Click" Margin="0,0,12,0"/>
+                            <Button x:Name="DisconnectButton" Content="Disconnect" Style="{StaticResource SecondaryButton}"
+                                    Click="DisconnectButton_Click" IsEnabled="False"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+            
+            <!-- Settings Tab -->
+            <Grid x:Name="SettingsTab" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <StackPanel Grid.Row="0" Margin="0,0,0,24">
+                    <TextBlock Text="Settings" FontSize="24" FontWeight="Bold" Foreground="#0f172a"/>
+                    <TextBlock Text="Configure mouse, keyboard, and display options" FontSize="14" 
+                               Foreground="#64748b" Margin="0,8,0,0"/>
+                </StackPanel>
+                
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <!-- Key Swapping Card -->
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="Key Mapping" FontSize="15" FontWeight="SemiBold" 
+                                           Foreground="#0f172a" Margin="0,0,0,12"/>
+                                
+                                <CheckBox x:Name="SwapCmdWinCheck" Content="Swap ⌘ Command ↔ ⊞ Windows key" 
+                                          Margin="0,8" Foreground="#0f172a"/>
+                                <CheckBox x:Name="SwapAltOptCheck" Content="Swap Alt ↔ Option" 
+                                          Margin="0,8" Foreground="#0f172a"/>
+                                <CheckBox x:Name="SwapCtrlCheck" Content="Swap Ctrl ↔ Control" 
+                                          Margin="0,8" Foreground="#0f172a"/>
+                            </StackPanel>
+                        </Border>
+                        
+                        <!-- Mouse Settings Card -->
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="Mouse" FontSize="15" FontWeight="SemiBold" 
+                                           Foreground="#0f172a" Margin="0,0,0,12"/>
+                                
+                                <Grid Margin="0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="60"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Sensitivity" VerticalAlignment="Center" Foreground="#0f172a"/>
+                                    <Slider x:Name="SensitivitySlider" Grid.Column="1" Minimum="0.5" Maximum="2" 
+                                            Value="1" VerticalAlignment="Center"/>
+                                </Grid>
+                                
+                                <CheckBox x:Name="SmoothScrollCheck" Content="Smooth scrolling" 
+                                          Margin="0,8" Foreground="#0f172a" IsChecked="True"/>
+                                <CheckBox x:Name="RelativeMouseCheck" Content="Relative mouse movement" 
+                                          Margin="0,8" Foreground="#0f172a"/>
+                            </StackPanel>
+                        </Border>
+                        
+                        <!-- Edge Detection Card -->
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                            <StackPanel>
+                                <TextBlock Text="Edge Detection" FontSize="15" FontWeight="SemiBold" 
+                                           Foreground="#0f172a" Margin="0,0,0,12"/>
+                                
+                                <TextBlock Text="Switch to Mac when mouse hits:" Foreground="#64748b" Margin="0,0,0,8"/>
+                                <RadioButton x:Name="EdgeLeftRadio" Content="Left edge" GroupName="Edge" 
+                                             Margin="0,4" Foreground="#0f172a" IsChecked="True"/>
+                                <RadioButton x:Name="EdgeRightRadio" Content="Right edge" GroupName="Edge" 
+                                             Margin="0,4" Foreground="#0f172a"/>
+                                <RadioButton x:Name="EdgeTopRadio" Content="Top edge" GroupName="Edge" 
+                                             Margin="0,4" Foreground="#0f172a"/>
+                                <RadioButton x:Name="EdgeBottomRadio" Content="Bottom edge" GroupName="Edge" 
+                                             Margin="0,4" Foreground="#0f172a"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+            
+            <!-- Clipboard Tab -->
+            <Grid x:Name="ClipboardTab" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <StackPanel Grid.Row="0" Margin="0,0,0,24">
+                    <TextBlock Text="Clipboard" FontSize="24" FontWeight="Bold" Foreground="#0f172a"/>
+                    <TextBlock Text="Share clipboard content between Mac and Windows" FontSize="14" 
+                               Foreground="#64748b" Margin="0,8,0,0"/>
+                </StackPanel>
+                
+                <Border Grid.Row="1" Style="{StaticResource Card}" VerticalAlignment="Top">
+                    <StackPanel>
+                        <CheckBox x:Name="AutoSyncClipboard" Content="Automatically sync clipboard" 
+                                  Margin="0,0,0,16" IsChecked="True" Foreground="#0f172a"/>
+                        
+                        <TextBlock Text="Current Clipboard" FontSize="13" FontWeight="SemiBold" 
+                                   Foreground="#0f172a" Margin="0,0,0,8"/>
+                        <Border Background="#f1f5f9" CornerRadius="6" Padding="12">
+                            <TextBlock x:Name="ClipboardContent" Text="(empty)" Foreground="#64748b" 
+                                       TextWrapping="Wrap" MaxHeight="100"/>
+                        </Border>
+                        
+                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                            <Button Content="📋 Copy from Mac" Style="{StaticResource SecondaryButton}"
+                                    Margin="0,0,12,0" Click="CopyFromMac_Click"/>
+                            <Button Content="📤 Send to Mac" Style="{StaticResource PrimaryButton}"
+                                    Click="SendToMac_Click"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
+            
+            <!-- Screens Tab -->
+            <Grid x:Name="ScreensTab" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <StackPanel Grid.Row="0" Margin="0,0,0,24">
+                    <TextBlock Text="Screen Layout" FontSize="24" FontWeight="Bold" Foreground="#0f172a"/>
+                    <TextBlock Text="Configure how screens are arranged" FontSize="14" 
+                               Foreground="#64748b" Margin="0,8,0,0"/>
+                </StackPanel>
+                
+                <Border Grid.Row="1" Style="{StaticResource Card}" VerticalAlignment="Top">
+                    <StackPanel>
+                        <TextBlock Text="Detected Screens" FontSize="15" FontWeight="SemiBold" 
+                                   Foreground="#0f172a" Margin="0,0,0,16"/>
+                        
+                        <!-- Screen Layout Canvas -->
+                        <Canvas x:Name="ScreenCanvas" Width="400" Height="200" Background="#f8fafc" 
+                                HorizontalAlignment="Left">
+                            <!-- Screens will be drawn here programmatically -->
+                        </Canvas>
+                        
+                        <TextBlock x:Name="ScreenInfoText" Text="Loading screen information..." 
+                                   FontSize="12" Foreground="#64748b" Margin="0,16,0,0"/>
+                        
+                        <Button Content="🔄 Refresh Screens" Style="{StaticResource SecondaryButton}"
+                                Margin="0,16,0,0" Click="RefreshScreens_Click" HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>
