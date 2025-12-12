@@ -60,3 +60,13 @@ env/
 *.app/
 !MacWinControl.app/
 publish/
+
+# Rust
+target/
+Cargo.lock
+*.rlib
+*.rmeta
+
+# Tauri
+dist/
+node_modules/

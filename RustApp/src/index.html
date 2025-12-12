@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MacWinControl</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>MacWinControl</h1>
+                <span class="subtitle">Cross-Platform</span>
+            </div>
+            
+            <nav class="nav">
+                <button class="nav-btn active" data-page="connection">
+                    🔗 Connection
+                </button>
+                <button class="nav-btn" data-page="computers">
+                    🖥️ Computers
+                </button>
+                <button class="nav-btn" data-page="settings">
+                    ⚙️ Settings
+                </button>
+            </nav>
+            
+            <div class="status-card">
+                <div class="status-indicator" id="statusIndicator"></div>
+                <div class="status-text">
+                    <span id="statusText">Disconnected</span>
+                    <span class="ip-text" id="localIp">Loading...</span>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="content">
+            <!-- Connection Page -->
+            <section class="page active" id="page-connection">
+                <h2>Connection</h2>
+                
+                <div class="card">
+                    <h3>This Computer</h3>
+                    <div class="info-row">
+                        <span>Name:</span>
+                        <span id="computerName">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span>IP Address:</span>
+                        <span id="ipAddress">Loading...</span>
+                    </div>
+                    <div class="info-row">
+                        <span>Screen:</span>
+                        <span id="screenSize">Loading...</span>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>Start as Server</h3>
+                    <p>Other computers will connect to this Mac</p>
+                    <button class="btn primary" id="btnStartServer">
+                        Start Server
+                    </button>
+                </div>
+                
+                <div class="card">
+                    <h3>Connect to Server</h3>
+                    <p>Connect to another computer running MacWinControl</p>
+                    <div class="input-group">
+                        <input type="text" id="serverIp" placeholder="192.168.1.100">
+                        <button class="btn primary" id="btnConnect">Connect</button>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Computers Page -->
+            <section class="page" id="page-computers">
+                <h2>Connected Computers</h2>
+                
+                <div class="card">
+                    <h3>Screen Layout</h3>
+                    <div class="screen-layout" id="screenLayout">
+                        <div class="screen this-mac">
+                            <span>This Mac</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>Add Computer</h3>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" id="newComputerName" placeholder="Windows PC">
+                    </div>
+                    <div class="form-group">
+                        <label>IP Address</label>
+                        <input type="text" id="newComputerIp" placeholder="192.168.1.101">
+                    </div>
+                    <div class="form-group">
+                        <label>Position</label>
+                        <select id="newComputerPosition">
+                            <option value="right">Right of this Mac</option>
+                            <option value="left">Left of this Mac</option>
+                            <option value="top">Above this Mac</option>
+                            <option value="bottom">Below this Mac</option>
+                        </select>
+                    </div>
+                    <button class="btn primary" id="btnAddComputer">Add Computer</button>
+                </div>
+                
+                <div class="card" id="computerList">
+                    <h3>Computer List</h3>
+                    <div id="computers"></div>
+                </div>
+            </section>
+            
+            <!-- Settings Page -->
+            <section class="page" id="page-settings">
+                <h2>Settings</h2>
+                
+                <div class="card">
+                    <h3>Clipboard Sync</h3>
+                    <div class="toggle-row">
+                        <span>Enable clipboard sharing</span>
+                        <label class="toggle">
+                            <input type="checkbox" id="clipboardSync" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>Edge Transition</h3>
+                    <div class="form-group">
+                        <label>Edge detection sensitivity</label>
+                        <input type="range" id="edgeSensitivity" min="1" max="10" value="5">
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>About</h3>
+                    <p>MacWinControl - Share mouse and keyboard between Mac and Windows</p>
+                    <p class="version">Built with Rust + Tauri</p>
+                </div>
+            </section>
+        </main>
+    </div>
+    
+    <script src="main.js"></script>
+</body>
+</html>
