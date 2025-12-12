@@ -594,7 +594,7 @@ class ModernApp:
             header_content,
             text="Seamless mouse & keyboard sharing",
             font=("SF Pro Text", 12),
-            fg="rgba(255,255,255,0.8)",
+            fg="#e0e7ff",  # Light indigo instead of rgba
             bg=COLORS["primary"]
         ).pack()
         

@@ -8,7 +8,7 @@ COLORS = {
     # Primary
     "primary": "#6366f1",
     "primary_hover": "#4f46e5",
-    "primary_light": "rgba(99, 102, 241, 0.1)",
+    "primary_light": "#eef2ff",  # Light indigo (no rgba for Tkinter)
     
     # Secondary
     "secondary": "#8b5cf6",
