@@ -5,17 +5,19 @@
 }
 
 :root {
-    --primary: #6366f1;
-    --primary-dark: #4f46e5;
+    --primary: #f59e0b;
+    --primary-dark: #d97706;
     --success: #10b981;
     --warning: #f59e0b;
     --danger: #ef4444;
-    --bg: #f8fafc;
+    --bg: #0f172a;
     --sidebar-bg: #1e293b;
-    --card-bg: #ffffff;
-    --text: #1e293b;
-    --text-light: #64748b;
-    --border: #e2e8f0;
+    --card-bg: #1e293b;
+    --text: #f8fafc;
+    --text-light: #94a3b8;
+    --border: #334155;
+    --gold: #f59e0b;
+    --dark-blue: #1e293b;
 }
 
 body {
@@ -197,12 +199,13 @@ body {
 }
 
 .btn.primary {
-    background: var(--primary);
-    color: white;
+    background: var(--gold);
+    color: #1e293b;
+    font-weight: 600;
 }
 
 .btn.primary:hover {
-    background: var(--primary-dark);
+    background: #fbbf24;
 }
 
 .btn.danger {
@@ -222,11 +225,13 @@ body {
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 0.875rem;
+    background: #0f172a;
+    color: var(--text);
 }
 
 .input-group input:focus {
     outline: none;
-    border-color: var(--primary);
+    border-color: var(--gold);
 }
 
 .form-group {
@@ -247,6 +252,8 @@ body {
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 0.875rem;
+    background: #0f172a;
+    color: var(--text);
 }
 
 /* Toggle */
@@ -288,7 +295,7 @@ body {
 }
 
 .toggle input:checked + .slider {
-    background: var(--primary);
+    background: var(--gold);
 }
 
 .toggle input:checked + .slider::before {
@@ -301,16 +308,17 @@ body {
     gap: 16px;
     justify-content: center;
     padding: 20px;
-    background: var(--bg);
+    background: #0f172a;
     border-radius: 8px;
     min-height: 150px;
     align-items: center;
+    border: 1px solid var(--border);
 }
 
 .screen {
     width: 120px;
     height: 80px;
-    background: var(--text);
+    background: #334155;
     border-radius: 6px;
     display: flex;
     align-items: center;
@@ -318,10 +326,13 @@ body {
     color: white;
     font-size: 0.75rem;
     position: relative;
+    border: 2px solid transparent;
 }
 
 .screen.this-mac {
-    background: var(--primary);
+    background: var(--gold);
+    color: #1e293b;
+    border-color: #fbbf24;
 }
 
 .screen.windows {
@@ -334,9 +345,10 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 12px;
-    background: var(--bg);
+    background: #0f172a;
     border-radius: 8px;
     margin-bottom: 8px;
+    border: 1px solid var(--border);
 }
 
 .computer-item .info {
