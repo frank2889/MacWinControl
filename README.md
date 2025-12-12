@@ -1,6 +1,18 @@
-# MacWinControl 🖥️🔗💻
+# MacWinControl 2.0 🖥️🔗💻
 
-Bedien je Windows PC met je Mac muis en toetsenbord! Net als Synergy/Barrier, maar simpeler.
+Bedien je Windows PC met je Mac muis en toetsenbord – en andersom! Net als Synergy, maar gratis.
+
+![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
+
+## ✨ Features
+
+- 🖱️ **Naadloze Muisbesturing** – Muis vloeit tussen Mac en Windows
+- ⌨️ **Gedeeld Toetsenbord** – Typ op beide machines met één toetsenbord
+- 📋 **Clipboard Sync** – Kopieer op Mac, plak op Windows (en andersom!)
+- 🔄 **Bidirectioneel** – Besturing werkt beide kanten op
+- ⌘ **Key Swapping** – ⌘ Command ↔ ⊞ Windows key mapping
+- 🎨 **Moderne UI** – Strakke, uniforme interface op beide platformen
 
 ## 🎯 Wat doet het?
 
@@ -93,11 +105,20 @@ Klik "Schermen Rangschikken" in de Mac app om de Windows schermen naar de juiste
 ```text
 MacWinControl/
 ├── MacApp/
-│   ├── MacWinControl.app/    ← Dubbelklik deze!
-│   └── MacWinControlApp.py   ← Python source
+│   ├── app_v2.py             ← Moderne Mac GUI app
+│   ├── bridge3.py            ← Standalone bridge (geen GUI)
+│   └── clipboard_manager.py  ← Clipboard sync
 ├── WindowsApp/
-│   ├── MacWinControlClient/  ← Windows project
-│   └── WindowsApp.sln
+│   └── MacWinControlClient/
+│       ├── MainWindow_v2.xaml      ← Moderne Windows UI
+│       ├── BridgeController.cs     ← Hoofd control logic
+│       ├── InputHookManager.cs     ← Muis/toetsenbord hooks
+│       ├── EdgeDetector.cs         ← Schermrand detectie
+│       ├── ClipboardManager.cs     ← Clipboard sync
+│       └── Protocol.cs             ← Netwerk protocol
+├── shared/
+│   ├── design_system.py      ← Uniforme kleuren/fonts
+│   └── protocol.py           ← Message definities
 └── README.md
 ```
 
