@@ -33,7 +33,8 @@ pub fn set_text(text: &str) -> Result<(), String> {
     }
 }
 
-// Watch for clipboard changes (polling-based)
+// Watch for clipboard changes (polling-based) - will be used for clipboard sync feature
+#[allow(dead_code)]
 pub fn watch_clipboard<F>(mut callback: F)
 where
     F: FnMut(String) + Send + 'static,

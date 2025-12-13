@@ -126,6 +126,7 @@ mod platform {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scroll(_delta_x: i32, _delta_y: i32) {
         // Scroll not implemented yet
     }
@@ -137,7 +138,7 @@ mod platform {
     use super::ScreenInfo;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Foundation::{POINT, RECT, BOOL, LPARAM};
     use windows::Win32::Graphics::Gdi::*;
 
     pub fn get_screen_size() -> (i32, i32) {
@@ -149,55 +150,76 @@ mod platform {
     }
 
     pub fn get_all_screens() -> Vec<ScreenInfo> {
-        let mut screens = Vec::new();
+        use std::sync::Mutex;
+        use once_cell::sync::Lazy;
+        
+        // Use a static to collect screens from the callback
+        static COLLECTED_SCREENS: Lazy<Mutex<Vec<ScreenInfo>>> = Lazy::new(|| Mutex::new(Vec::new()));
+        
+        // Clear previous results
+        COLLECTED_SCREENS.lock().unwrap().clear();
+        
+        // Callback for EnumDisplayMonitors
+        unsafe extern "system" fn monitor_callback(
+            hmonitor: HMONITOR,
+            _hdc: HDC,
+            _rect: *mut RECT,
+            _lparam: LPARAM,
+        ) -> BOOL {
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            
+            if GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut MONITORINFO).as_bool() {
+                let rect = info.monitorInfo.rcMonitor;
+                let is_primary = (info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+                
+                // Convert device name to string
+                let name_slice: Vec<u16> = info.szDevice.iter().take_while(|&&c| c != 0).copied().collect();
+                let name = String::from_utf16_lossy(&name_slice);
+                let display_name = if is_primary { 
+                    "Primary".to_string() 
+                } else { 
+                    name.trim_start_matches("\\\\.\\").to_string()
+                };
+                
+                let screen = ScreenInfo {
+                    name: display_name,
+                    x: rect.left,
+                    y: rect.top,
+                    width: rect.right - rect.left,
+                    height: rect.bottom - rect.top,
+                    is_primary,
+                };
+                
+                // Access the static - this is safe because EnumDisplayMonitors is synchronous
+                if let Ok(mut screens) = COLLECTED_SCREENS.lock() {
+                    screens.push(screen);
+                }
+            }
+            
+            BOOL(1) // Continue enumeration
+        }
         
         unsafe {
-            // Get virtual screen bounds
-            let virt_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let virt_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let virt_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            let virt_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            let primary_width = GetSystemMetrics(SM_CXSCREEN);
-            let primary_height = GetSystemMetrics(SM_CYSCREEN);
-            
-            // Primary monitor
+            let _ = EnumDisplayMonitors(None, None, Some(monitor_callback), LPARAM(0));
+        }
+        
+        // Get results and sort by x position
+        let mut screens = COLLECTED_SCREENS.lock().unwrap().clone();
+        screens.sort_by_key(|s| s.x);
+        
+        // If no screens found, return a fallback
+        if screens.is_empty() {
             screens.push(ScreenInfo {
                 name: "Primary".to_string(),
                 x: 0,
                 y: 0,
-                width: primary_width,
-                height: primary_height,
+                width: unsafe { GetSystemMetrics(SM_CXSCREEN) },
+                height: unsafe { GetSystemMetrics(SM_CYSCREEN) },
                 is_primary: true,
             });
-            
-            // If virtual screen is larger, there are more monitors
-            if virt_width > primary_width || virt_left < 0 {
-                // Secondary to the left
-                if virt_left < 0 {
-                    screens.push(ScreenInfo {
-                        name: "Secondary".to_string(),
-                        x: virt_left,
-                        y: 0,
-                        width: -virt_left,
-                        height: virt_height,
-                        is_primary: false,
-                    });
-                }
-                // Secondary to the right
-                if virt_width > primary_width {
-                    screens.push(ScreenInfo {
-                        name: "Secondary".to_string(),
-                        x: primary_width,
-                        y: 0,
-                        width: virt_width - primary_width,
-                        height: virt_height,
-                        is_primary: false,
-                    });
-                }
-            }
         }
         
-        screens.sort_by_key(|s| s.x);
         screens
     }
 
@@ -211,7 +233,11 @@ mod platform {
 
     pub fn move_mouse(x: i32, y: i32) {
         unsafe {
-            let _ = SetCursorPos(x, y);
+            let result = SetCursorPos(x, y);
+            if !result.as_bool() {
+                // Log error if move fails
+                println!("⚠️ SetCursorPos({}, {}) failed!", x, y);
+            }
         }
     }
 

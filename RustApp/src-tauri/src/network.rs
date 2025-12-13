@@ -3,7 +3,7 @@
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,9 +28,7 @@ pub static CONNECTED_TO: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new
 // Separate write half for sending messages (avoids deadlock with read loop)
 pub static WRITE_STREAM: Lazy<RwLock<Option<Arc<Mutex<OwnedWriteHalf>>>>> = Lazy::new(|| RwLock::new(None));
 
-// Legacy - still used for some things but being phased out
-pub static ACTIVE_CLIENT: Lazy<RwLock<Option<Arc<Mutex<TcpStream>>>>> = Lazy::new(|| RwLock::new(None));
-// Track if ACTIVE_CLIENT is an outgoing connection (we initiated it)
+// Track if we initiated the connection (outgoing) or received it (incoming)
 pub static IS_OUTGOING_CONNECTION: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
 
 // Control state - which computer has mouse/keyboard control
@@ -133,6 +131,7 @@ pub struct Message {
     pub layout: Option<String>,  // JSON string of saved layout positions
 }
 
+#[allow(dead_code)]
 impl Message {
     pub fn hello_with_screens(name: &str, screens: Vec<ScreenData>, computer_type: &str) -> Self {
         Message {
@@ -228,49 +227,51 @@ impl Message {
     }
 }
 
-pub type ClientList = Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>;
-
 pub async fn start_server(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    println!("Server listening on port {}", port);
-    
-    let clients: ClientList = Arc::new(Mutex::new(Vec::new()));
+    println!("🖥️ Server listening on port {}", port);
     
     loop {
         let (stream, addr) = listener.accept().await?;
-        println!("New connection from: {}", addr);
+        println!("📥 New incoming connection from: {}", addr);
         
-        let client = Arc::new(Mutex::new(stream));
-        clients.lock().await.push(client.clone());
+        // Split the stream into read and write halves (just like connect_to_server does)
+        let (read_half, write_half) = stream.into_split();
         
-        // Only set as ACTIVE_CLIENT if we don't already have an outgoing connection
-        // This prevents overwriting our outgoing connection with incoming ones
+        // Store write half for sending messages (this is the KEY FIX!)
+        // Only set if we don't already have one from an outgoing connection
         let has_outgoing = *IS_OUTGOING_CONNECTION.read().unwrap();
         if !has_outgoing {
-            println!("📝 Using incoming connection as ACTIVE_CLIENT (no outgoing yet)");
-            *ACTIVE_CLIENT.write().unwrap() = Some(client.clone());
+            let write_arc = Arc::new(Mutex::new(write_half));
+            println!("📤 Setting WRITE_STREAM for incoming connection (we are server)");
+            *WRITE_STREAM.write().unwrap() = Some(write_arc);
         } else {
-            println!("📝 Keeping existing outgoing connection as ACTIVE_CLIENT");
+            println!("📝 Keeping existing outgoing WRITE_STREAM");
+            // We still need to handle the write_half somehow - drop it since we won't use it
+            drop(write_half);
         }
+        
         *IS_CONNECTED.write().unwrap() = true;
         *CONNECTED_TO.write().unwrap() = Some(addr.ip().to_string());
         
-        let clients_clone = clients.clone();
+        // Spawn read loop for this client using the read half
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client, clients_clone).await {
+            if let Err(e) = handle_client_read_loop(read_half, addr).await {
                 eprintln!("Client error: {}", e);
             }
         });
     }
 }
 
-async fn handle_client(
-    client: Arc<Mutex<TcpStream>>,
-    _clients: ClientList,
+/// Handle incoming client connection (server-side read loop)
+/// Uses OwnedReadHalf so we don't block the write half
+async fn handle_client_read_loop(
+    read_half: tokio::net::tcp::OwnedReadHalf,
+    addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut buffer = vec![0u8; 4096];
+    use tokio::io::BufReader;
     
-    // Send hello message with screen info
+    // First, send hello message using WRITE_STREAM
     {
         let computer_name = get_computer_name();
         let screens = crate::input::get_all_screens();
@@ -293,25 +294,44 @@ async fn handle_client(
         let hello = Message::hello_with_screens(&computer_name, screen_data, computer_type);
         let json = serde_json::to_string(&hello)? + "\n";
         
-        let mut stream = client.lock().await;
-        stream.write_all(json.as_bytes()).await?;
+        // Use the WRITE_STREAM to send hello
+        let writer = { WRITE_STREAM.read().unwrap().clone() };
+        if let Some(writer) = writer {
+            let mut stream = writer.lock().await;
+            stream.write_all(json.as_bytes()).await?;
+            stream.flush().await?;
+            println!("📤 Sent hello to {}", addr);
+        } else {
+            println!("⚠️ No WRITE_STREAM available to send hello!");
+        }
     }
+    
+    // Read loop using BufReader for proper line handling
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
     
     loop {
-        let n = {
-            let mut stream = client.lock().await;
-            stream.read(&mut buffer).await?
-        };
-        
-        if n == 0 {
-            println!("Client disconnected");
-            break;
-        }
-        
-        let data = String::from_utf8_lossy(&buffer[..n]);
-        for line in data.lines() {
-            if let Ok(msg) = serde_json::from_str::<Message>(line) {
-                handle_message(&msg, &client).await?;
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => {
+                println!("📤 Client {} disconnected", addr);
+                *IS_CONNECTED.write().unwrap() = false;
+                *CONNECTED_TO.write().unwrap() = None;
+                *WRITE_STREAM.write().unwrap() = None;
+                break;
+            }
+            Ok(_) => {
+                if let Ok(msg) = serde_json::from_str::<Message>(&line) {
+                    // Use the simple handler (doesn't need stream reference)
+                    if let Err(e) = handle_message_simple(&msg).await {
+                        eprintln!("Error handling message: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Read error from {}: {}", addr, e);
+                *IS_CONNECTED.write().unwrap() = false;
+                break;
             }
         }
     }
@@ -319,124 +339,19 @@ async fn handle_client(
     Ok(())
 }
 
-async fn handle_message(
-    msg: &Message, 
-    client: &Arc<Mutex<TcpStream>>
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match msg.msg_type.as_str() {
-        "ping" => {
-            let pong = Message::pong();
-            let json = serde_json::to_string(&pong)? + "\n";
-            let mut stream = client.lock().await;
-            stream.write_all(json.as_bytes()).await?;
-        }
-        "mouse_move" => {
-            if let (Some(x), Some(y)) = (msg.x, msg.y) {
-                // Only move if we're being controlled by remote
-                let being_controlled = *BEING_CONTROLLED.read().unwrap();
-                if being_controlled {
-                    crate::input::move_mouse(x, y);
-                }
-            }
-        }
-        "mouse_click" => {
-            if let (Some(button), Some(action)) = (&msg.button, &msg.action) {
-                crate::input::mouse_click(button, action);
-            }
-        }
-        "key_event" => {
-            if let (Some(key_code), Some(action)) = (msg.key_code, &msg.action) {
-                crate::input::key_event(key_code, action);
-            }
-        }
-        "clipboard" => {
-            if let Some(text) = &msg.text {
-                let _ = crate::clipboard_sync::set_text(text);
-            }
-        }
-        "hello" => {
-            let name = msg.name.clone().unwrap_or_else(|| "Unknown".to_string());
-            let comp_type = msg.computer_type.clone().unwrap_or_else(|| "unknown".to_string());
-            println!("📩 Received hello from: {} ({})", name, comp_type);
-            
-            // Store received screens
-            if let Some(screens) = &msg.screens {
-                println!("   📺 Received {} screens", screens.len());
-                for s in screens {
-                    println!("      - {} {}x{} at ({},{})", s.name, s.width, s.height, s.x, s.y);
-                }
-                
-                let mut remote = REMOTE_SCREENS.write().unwrap();
-                // Remove old screens from this computer
-                remote.retain(|s| s.computer_name != name);
-                // Add new screens
-                for s in screens {
-                    remote.push(ReceivedScreen {
-                        computer_name: name.clone(),
-                        computer_type: comp_type.clone(),
-                        name: s.name.clone(),
-                        x: s.x,
-                        y: s.y,
-                        width: s.width,
-                        height: s.height,
-                        is_primary: s.is_primary,
-                    });
-                }
-                println!("   ✅ Now have {} total remote screens", remote.len());
-            } else {
-                println!("   ⚠️ No screens in hello message!");
-            }
-        }
-        "control_start" => {
-            // Remote is taking control of our mouse/keyboard
-            println!("🎮 Remote is taking control!");
-            *BEING_CONTROLLED.write().unwrap() = true;
-            
-            // Move mouse to the specified position
-            if let (Some(x), Some(y)) = (msg.x, msg.y) {
-                println!("🖱️ Moving mouse to ({}, {})", x, y);
-                // Clamp to valid screen coordinates
-                let screens = crate::input::get_all_screens();
-                let min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
-                let max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
-                let min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
-                let max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
-                
-                let clamped_x = x.clamp(min_x, max_x - 1);
-                let clamped_y = y.clamp(min_y, max_y - 1);
-                
-                println!("   Screen bounds: x={}-{}, y={}-{}", min_x, max_x, min_y, max_y);
-                println!("   Clamped position: ({}, {})", clamped_x, clamped_y);
-                
-                crate::input::move_mouse(clamped_x, clamped_y);
-                
-                // Verify the move worked
-                let (actual_x, actual_y) = crate::input::get_mouse_position();
-                println!("   Actual position after move: ({}, {})", actual_x, actual_y);
-            }
-        }
-        "control_end" => {
-            // Remote is releasing control
-            println!("🔓 Remote released control");
-            *BEING_CONTROLLED.write().unwrap() = false;
-        }
-        "layout_sync" => {
-            // Remote is sending their screen layout
-            if let Some(layout) = &msg.layout {
-                println!("📐 Received layout sync: {}", layout);
-                *SYNCED_LAYOUT.write().unwrap() = Some(layout.clone());
-            }
-        }
-        _ => {
-            println!("Unknown message type: {}", msg.msg_type);
-        }
-    }
-    Ok(())
-}
-
-/// Simplified message handler for client read loop (doesn't need stream reference)
+/// Unified message handler - used by both server and client read loops
 async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match msg.msg_type.as_str() {
+        "ping" => {
+            // Respond to ping with pong using WRITE_STREAM
+            let writer = { WRITE_STREAM.read().unwrap().clone() };
+            if let Some(writer) = writer {
+                let pong = Message::pong();
+                let json = serde_json::to_string(&pong)? + "\n";
+                let mut stream = writer.lock().await;
+                stream.write_all(json.as_bytes()).await?;
+            }
+        }
         "hello" => {
             if let Some(ref name) = msg.name {
                 let comp_type = msg.computer_type.clone().unwrap_or_else(|| "unknown".to_string());
@@ -444,6 +359,9 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
                 
                 if let Some(ref screens) = msg.screens {
                     println!("   📺 Received {} screens", screens.len());
+                    for s in screens {
+                        println!("      - {} {}x{} at ({},{})", s.name, s.width, s.height, s.x, s.y);
+                    }
                     let mut remote = REMOTE_SCREENS.write().unwrap();
                     remote.retain(|s| s.computer_name != *name);
                     for s in screens {
@@ -463,11 +381,29 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
             }
         }
         "control_start" => {
-            println!("🎮 Remote is taking control!");
+            // Remote is taking control of our mouse/keyboard
+            println!("🎮 Remote is taking control of our mouse!");
             *BEING_CONTROLLED.write().unwrap() = true;
+            
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
-                println!("🖱️ Moving mouse to ({}, {})", x, y);
-                crate::input::move_mouse(x, y);
+                // Clamp to valid screen coordinates
+                let screens = crate::input::get_all_screens();
+                let min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+                let max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                let min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+                let max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+                
+                let clamped_x = x.clamp(min_x, max_x - 1);
+                let clamped_y = y.clamp(min_y, max_y - 1);
+                
+                println!("🖱️ Moving mouse to ({}, {}) [clamped from ({}, {})]", clamped_x, clamped_y, x, y);
+                println!("   Screen bounds: x={}-{}, y={}-{}", min_x, max_x, min_y, max_y);
+                
+                crate::input::move_mouse(clamped_x, clamped_y);
+                
+                // Verify the move worked
+                let (actual_x, actual_y) = crate::input::get_mouse_position();
+                println!("   ✅ Actual position after move: ({}, {})", actual_x, actual_y);
             }
         }
         "control_end" => {
@@ -485,7 +421,10 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
                 // Only move if we're being controlled by remote
                 let being_controlled = *BEING_CONTROLLED.read().unwrap();
                 if being_controlled {
+                    println!("🖱️ [handle_message_simple] Moving mouse to ({}, {})", x, y);
                     crate::input::move_mouse(x, y);
+                } else {
+                    println!("⚠️ [handle_message_simple] Got mouse_move but BEING_CONTROLLED=false!");
                 }
             }
         }
@@ -506,9 +445,10 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStream>>, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn connect_to_server(ip: &str, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔗 Connecting to {}:{}...", ip, port);
     let stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
-    println!("Connected to {}:{}", ip, port);
+    println!("✅ TCP connected to {}:{}", ip, port);
     
     // Split the stream into read and write halves
     let (read_half, write_half) = stream.into_split();
@@ -547,6 +487,7 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStrea
     }
     
     // Start client read loop to receive messages from server (uses read half only)
+    let ip_clone = ip.to_string();
     tokio::spawn(async move {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
@@ -554,15 +495,14 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStrea
             line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) => {
-                    println!("Disconnected from server");
+                    println!("📤 Disconnected from server {}", ip_clone);
+                    *IS_CONNECTED.write().unwrap() = false;
+                    *CONNECTED_TO.write().unwrap() = None;
+                    *WRITE_STREAM.write().unwrap() = None;
                     break;
                 }
                 Ok(_) => {
                     if let Ok(msg) = serde_json::from_str::<Message>(&line) {
-                        // Create a dummy client for handle_message (not used for control_start)
-                        let dummy = Arc::new(Mutex::new(TcpStream::connect("127.0.0.1:1").await.ok()));
-                        // We can't easily pass the stream here, but handle_message for received messages
-                        // doesn't need to write back for control_start - it just calls move_mouse
                         if let Err(e) = handle_message_simple(&msg).await {
                             eprintln!("Error handling message: {}", e);
                         }
@@ -570,21 +510,19 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStrea
                 }
                 Err(e) => {
                     eprintln!("Read error: {}", e);
+                    *IS_CONNECTED.write().unwrap() = false;
                     break;
                 }
             }
         }
     });
     
-    // Return a dummy Arc for compatibility (not used anymore)
-    let dummy_stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
-    Ok(Arc::new(Mutex::new(dummy_stream)))
-}
-
-pub async fn send_message(client: &Arc<Mutex<TcpStream>>, msg: &Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let json = serde_json::to_string(msg)? + "\n";
-    let mut stream = client.lock().await;
-    stream.write_all(json.as_bytes()).await?;
+    // Mark as connected
+    *IS_CONNECTED.write().unwrap() = true;
+    *CONNECTED_TO.write().unwrap() = Some(ip.to_string());
+    
+    println!("✅ Connection established to {}:{}", ip, port);
+    
     Ok(())
 }
 
@@ -694,7 +632,7 @@ async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Er
     let mut buffer = [0u8; 1024];
     
     loop {
-        let (len, addr) = socket.recv_from(&mut buffer).await?;
+        let (len, _addr) = socket.recv_from(&mut buffer).await?;
         let message = String::from_utf8_lossy(&buffer[..len]);
         
         // Parse: MACWINCTRL|name|ip|type
@@ -896,8 +834,8 @@ pub async fn start_mouse_tracking() {
                 let screens = crate::input::get_all_screens();
                 let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
                 let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
-                let total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
-                let total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+                let _total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+                let _total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
                 
                 // Check for return to local (after cooldown)
                 let should_return = if elapsed > 500 {
@@ -1068,19 +1006,29 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     crate::input::move_mouse(edge_x, edge_y);
 }
 
+// Counter to reduce log spam - only log every Nth message
+static MOUSE_MSG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 async fn send_mouse_to_remote(x: i32, y: i32) {
-    // Clone the client outside of async context to avoid Send issues
-    let client = {
-        ACTIVE_CLIENT.read().unwrap().clone()
-    };
-    
     let writer = { WRITE_STREAM.read().unwrap().clone() };
     
     if let Some(writer) = writer {
         let msg = Message::mouse_move(x, y);
         let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
         let mut stream = writer.lock().await;
-        let _ = stream.write_all(json.as_bytes()).await;
+        let result = stream.write_all(json.as_bytes()).await;
+        
+        // Log every 50th message to avoid spam
+        let count = MOUSE_MSG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if count % 50 == 0 {
+            if result.is_ok() {
+                println!("🖱️ Sending mouse_move to remote: ({}, {}) [msg #{}]", x, y, count);
+            } else {
+                println!("❌ Failed to send mouse_move: {:?}", result);
+            }
+        }
+    } else {
+        println!("❌ No WRITE_STREAM available for mouse_move!");
     }
 }
 
@@ -1116,7 +1064,8 @@ async fn send_control_message(msg_type: &str, x: i32, y: i32) {
     }
 }
 
-/// Send keyboard event to remote
+/// Send keyboard event to remote (will be used when keyboard sharing is implemented)
+#[allow(dead_code)]
 pub async fn send_key_to_remote(key_code: u32, action: &str) {
     let is_active = *CONTROL_ACTIVE.read().unwrap();
     if !is_active { return; }
@@ -1131,7 +1080,8 @@ pub async fn send_key_to_remote(key_code: u32, action: &str) {
     }
 }
 
-/// Send mouse click to remote
+/// Send mouse click to remote (will be used when click sharing is implemented)
+#[allow(dead_code)]
 pub async fn send_click_to_remote(button: &str, action: &str) {
     let is_active = *CONTROL_ACTIVE.read().unwrap();
     if !is_active { return; }
@@ -1146,7 +1096,8 @@ pub async fn send_click_to_remote(button: &str, action: &str) {
     }
 }
 
-/// Release control back to local
+/// Release control back to local (can be called from UI)
+#[allow(dead_code)]
 pub fn release_control() {
     *CONTROL_ACTIVE.write().unwrap() = false;
     println!("🔓 Control released back to local");
