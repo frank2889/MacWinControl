@@ -40,6 +40,7 @@ pub struct DebugInfo {
     pub mouse_y: i32,
     pub screen_bounds: String,
     pub edge_status: String,
+    pub remote_screen_count: usize,
     pub last_update: u64,
 }
 
@@ -312,10 +313,15 @@ async fn handle_message(
         "hello" => {
             let name = msg.name.clone().unwrap_or_else(|| "Unknown".to_string());
             let comp_type = msg.computer_type.clone().unwrap_or_else(|| "unknown".to_string());
-            println!("Received hello from: {} ({})", name, comp_type);
+            println!("📩 Received hello from: {} ({})", name, comp_type);
             
             // Store received screens
             if let Some(screens) = &msg.screens {
+                println!("   📺 Received {} screens", screens.len());
+                for s in screens {
+                    println!("      - {} {}x{} at ({},{})", s.name, s.width, s.height, s.x, s.y);
+                }
+                
                 let mut remote = REMOTE_SCREENS.write().unwrap();
                 // Remove old screens from this computer
                 remote.retain(|s| s.computer_name != name);
@@ -332,7 +338,9 @@ async fn handle_message(
                         is_primary: s.is_primary,
                     });
                 }
-                println!("Stored {} remote screens from {}", screens.len(), name);
+                println!("   ✅ Now have {} total remote screens", remote.len());
+            } else {
+                println!("   ⚠️ No screens in hello message!");
             }
         }
         "control_start" => {
@@ -663,11 +671,14 @@ pub async fn start_mouse_tracking() {
                 )
             };
             
+            let remote_count = REMOTE_SCREENS.read().unwrap().len();
+            
             let mut debug = DEBUG_INFO.write().unwrap();
             debug.mouse_x = mx;
             debug.mouse_y = my;
             debug.screen_bounds = format!("x:[{},{}] y:[{},{}]", total_min_x, total_max_x, total_min_y, total_max_y);
             debug.edge_status = edge_status;
+            debug.remote_screen_count = remote_count;
             debug.last_update = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

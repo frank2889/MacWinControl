@@ -231,6 +231,7 @@ pub struct DebugInfoResponse {
     pub mouse_y: i32,
     pub screen_bounds: String,
     pub edge_status: String,
+    pub remote_screen_count: usize,
     pub last_update: u64,
 }
 
@@ -238,6 +239,14 @@ pub struct DebugInfoResponse {
 fn get_debug_info() -> DebugInfoResponse {
     let debug = network::get_debug_info();
     DebugInfoResponse {
+        mouse_x: debug.mouse_x,
+        mouse_y: debug.mouse_y,
+        screen_bounds: debug.screen_bounds,
+        edge_status: debug.edge_status,
+        remote_screen_count: debug.remote_screen_count,
+        last_update: debug.last_update,
+    }
+}
         mouse_x: debug.mouse_x,
         mouse_y: debug.mouse_y,
         screen_bounds: debug.screen_bounds,

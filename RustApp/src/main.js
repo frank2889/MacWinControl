@@ -129,7 +129,8 @@ async function loadDebugInfo() {
         document.getElementById('debugMousePos').textContent = `(${debug.mouse_x}, ${debug.mouse_y})`;
         document.getElementById('debugScreenBounds').textContent = debug.screen_bounds || '-';
         document.getElementById('debugEdgeStatus').textContent = debug.edge_status || '-';
-        document.getElementById('debugRemoteScreens').textContent = remoteScreens.length.toString();
+        // Use backend count which is more accurate
+        document.getElementById('debugRemoteScreens').textContent = `${debug.remote_screen_count} (backend) / ${remoteScreens.length} (frontend)`;
     } catch (err) {
         // Silently ignore
     }
