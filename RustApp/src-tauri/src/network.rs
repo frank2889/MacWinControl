@@ -819,42 +819,29 @@ pub async fn start_mouse_tracking() {
             continue;
         }
         
-        // If we're controlling remote, capture mouse movement and send delta
+        // If we're controlling remote, capture mouse movement and send to remote
         if control_active {
             let edge_pos = *EDGE_LOCK_POS.read().unwrap();
             let (remote_x, remote_y) = *REMOTE_MOUSE_POS.read().unwrap();
             
-            // Calculate delta from edge position
-            let delta_x = mx - edge_pos.0;
-            let delta_y = my - edge_pos.1;
+            // Calculate delta from where mouse was last frame
+            let delta_x = mx - last_pos.0;
+            let delta_y = my - last_pos.1;
             
             // Only send if there's actual movement
             if delta_x != 0 || delta_y != 0 {
-                // Update remote mouse position
+                // Update remote mouse position with the delta
                 let new_remote_x = remote_x + delta_x;
                 let new_remote_y = remote_y + delta_y;
                 
-                // Clamp to remote screen bounds
+                // Get remote screen bounds
                 let remote_screens = REMOTE_SCREENS.read().unwrap().clone();
                 let remote_min_x = remote_screens.iter().map(|s| s.x).min().unwrap_or(0);
                 let remote_max_x = remote_screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
                 let remote_min_y = remote_screens.iter().map(|s| s.y).min().unwrap_or(0);
                 let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
                 
-                let clamped_x = new_remote_x.clamp(remote_min_x, remote_max_x - 1);
-                let clamped_y = new_remote_y.clamp(remote_min_y, remote_max_y - 1);
-                
-                // Store new remote position
-                *REMOTE_MOUSE_POS.write().unwrap() = (clamped_x, clamped_y);
-                
-                // Send to remote
-                send_mouse_to_remote(clamped_x, clamped_y).await;
-                
-                // Move local mouse back to edge position
-                crate::input::move_mouse(edge_pos.0, edge_pos.1);
-                
-                // Check if we should return control (but not immediately after starting!)
-                // Wait at least 500ms before allowing return to prevent immediate snap-back
+                // Check if remote mouse would go past the "return" edge
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -862,27 +849,52 @@ pub async fn start_mouse_tracking() {
                 let start_time = *CONTROL_START_TIME.read().unwrap();
                 let elapsed = now - start_time;
                 
-                if elapsed > 500 {  // Only check for return after 500ms
-                    let screens = crate::input::get_all_screens();
-                    let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
-                    let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                // Get local screen info
+                let screens = crate::input::get_all_screens();
+                let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+                let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                let total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+                let total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+                
+                // Check for return to local (after cooldown)
+                let should_return = if elapsed > 500 {
+                    // At right edge of local (went to Windows on the right) and remote going left past edge
+                    if edge_pos.0 >= total_max_x - 20 && new_remote_x < remote_min_x {
+                        true
+                    }
+                    // At left edge of local (went to Windows on the left) and remote going right past edge
+                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x > remote_max_x {
+                        true
+                    }
+                    else { false }
+                } else { false };
+                
+                if should_return {
+                    println!("🔙 Returning control to local");
+                    *CONTROL_ACTIVE.write().unwrap() = false;
+                    send_control_message("control_end", 0, 0).await;
                     
-                    // At right edge and remote mouse hit left edge? Return to local
-                    if edge_pos.0 >= total_max_x - 20 && clamped_x <= remote_min_x + 5 {
-                        println!("🔙 Remote mouse hit left edge, returning control to local");
-                        *CONTROL_ACTIVE.write().unwrap() = false;
-                        send_control_message("control_end", 0, 0).await;
-                    }
-                    // At left edge and remote mouse hit right edge? Return to local
-                    else if edge_pos.0 <= total_min_x + 20 && clamped_x >= remote_max_x - 5 {
-                        println!("🔙 Remote mouse hit right edge, returning control to local");
-                        *CONTROL_ACTIVE.write().unwrap() = false;
-                        send_control_message("control_end", 0, 0).await;
-                    }
+                    // Move local mouse back into the screen
+                    let return_x = if edge_pos.0 >= total_max_x - 20 { total_max_x - 50 } else { total_min_x + 50 };
+                    crate::input::move_mouse(return_x, edge_pos.1);
+                } else {
+                    // Clamp to remote screen bounds
+                    let clamped_x = new_remote_x.clamp(remote_min_x, remote_max_x - 1);
+                    let clamped_y = new_remote_y.clamp(remote_min_y, remote_max_y - 1);
+                    
+                    // Store new remote position
+                    *REMOTE_MOUSE_POS.write().unwrap() = (clamped_x, clamped_y);
+                    
+                    // Send to remote
+                    send_mouse_to_remote(clamped_x, clamped_y).await;
                 }
+                
+                // Always move local mouse back to edge position (keeps it hidden at edge)
+                crate::input::move_mouse(edge_pos.0, edge_pos.1);
             }
             
-            last_pos = (mx, my);
+            // Update last_pos to edge position (since we keep resetting there)
+            last_pos = (edge_pos.0, edge_pos.1);
         } else {
             // Not controlling - check for edge transition
             if mx != last_pos.0 || my != last_pos.1 {
