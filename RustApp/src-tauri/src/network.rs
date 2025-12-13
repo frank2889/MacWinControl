@@ -899,16 +899,16 @@ pub async fn start_mouse_tracking() {
                 let _total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
                 
                 // Check for return to local (after cooldown)
-                // Use delta direction: if moving back towards local edge, return control
-                let should_return = if elapsed > 500 {
-                    // Went to right edge (Windows is right) and now moving left strongly
-                    if edge_pos.0 >= total_max_x - 20 && new_remote_x < remote_min_x + 50 && delta_x < -20 {
-                        println!("🔙 Detected return: moving left from right edge");
+                // Only return if remote mouse is at the LEFT edge of remote screens AND moving left
+                let should_return = if elapsed > 1000 {  // Increased cooldown to 1 second
+                    // Went to right edge (Windows is right) - return when at left edge of remote and moving left
+                    if edge_pos.0 >= total_max_x - 20 && new_remote_x <= remote_min_x + 10 && delta_x < -5 {
+                        println!("🔙 Detected return: at left edge of remote, moving left (remote_x={}, delta={})", new_remote_x, delta_x);
                         true
                     }
-                    // Went to left edge (Windows is left) and now moving right strongly
-                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x > remote_max_x - 50 && delta_x > 20 {
-                        println!("🔙 Detected return: moving right from left edge");
+                    // Went to left edge (Windows is left) - return when at right edge of remote and moving right
+                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x >= remote_max_x - 10 && delta_x > 5 {
+                        println!("🔙 Detected return: at right edge of remote, moving right");
                         true
                     }
                     else { false }
@@ -919,8 +919,9 @@ pub async fn start_mouse_tracking() {
                     *CONTROL_ACTIVE.write().unwrap() = false;
                     send_control_message("control_end", 0, 0).await;
                     
-                    // Move local mouse to center of the screen we came from
-                    let return_y = (screens[0].y + screens[0].height / 2).clamp(0, screens[0].y + screens[0].height - 1);
+                    // Find the primary screen (or first one) for return position
+                    let primary = screens.iter().find(|s| s.is_primary).unwrap_or(&screens[0]);
+                    let return_y = primary.y + primary.height / 2;
                     let return_x = if edge_pos.0 >= total_max_x - 20 { 
                         total_max_x - 100  // Come back from right
                     } else { 
