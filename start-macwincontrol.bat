@@ -1,0 +1,3 @@
+@echo off
+echo Starting MacWinControl...
+start "" "%LOCALAPPDATA%\MacWinControl\macwincontrol.exe"

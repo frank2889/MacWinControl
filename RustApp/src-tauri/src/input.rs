@@ -233,10 +233,9 @@ mod platform {
 
     pub fn move_mouse(x: i32, y: i32) {
         unsafe {
-            let result = SetCursorPos(x, y);
-            if !result.as_bool() {
+            if let Err(e) = SetCursorPos(x, y) {
                 // Log error if move fails
-                println!("⚠️ SetCursorPos({}, {}) failed!", x, y);
+                println!("⚠️ SetCursorPos({}, {}) failed: {:?}", x, y, e);
             }
         }
     }
