@@ -698,9 +698,10 @@ async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Er
                 }
             }
             
-            // Auto-connect if not already connected
-            let is_connected = *IS_CONNECTED.read().unwrap();
-            if !is_connected {
+            // Auto-connect if we don't have a write stream yet
+            // (incoming connections don't give us a write stream for sending)
+            let has_write_stream = WRITE_STREAM.read().unwrap().is_some();
+            if !has_write_stream {
                 println!("🔗 Auto-connecting to {}...", peer_ip);
                 
                 let peer_ip_clone = peer_ip.clone();
