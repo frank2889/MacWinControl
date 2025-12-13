@@ -174,10 +174,13 @@ mod platform {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
-        ShowCursor,
+        ShowCursor, GetCursorPos, SetCursorPos,
     };
     use windows::Win32::Foundation::{POINT, RECT, BOOL, LPARAM};
     use windows::Win32::Graphics::Gdi::*;
+
+    // MONITORINFOF_PRIMARY constant (may not be exported in newer windows crate versions)
+    const MONITORINFOF_PRIMARY: u32 = 0x00000001;
 
     pub fn get_screen_size() -> (i32, i32) {
         unsafe {
