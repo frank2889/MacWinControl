@@ -37,6 +37,11 @@ pub static IS_OUTGOING_CONNECTION: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new
 pub static CONTROL_ACTIVE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = we're controlling remote
 pub static BEING_CONTROLLED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));  // true = remote is controlling us
 
+// Edge lock state - where to keep local mouse pinned while controlling remote
+pub static EDGE_LOCK_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new((0, 0)));
+// Current remote mouse position (tracked locally)
+pub static REMOTE_MOUSE_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new((0, 0)));
+
 // Debug state for UI
 pub static DEBUG_INFO: Lazy<RwLock<DebugInfo>> = Lazy::new(|| RwLock::new(DebugInfo::default()));
 
@@ -784,15 +789,66 @@ pub async fn start_mouse_tracking() {
             continue;
         }
         
-        // If position changed
-        if mx != last_pos.0 || my != last_pos.1 {
-            last_pos = (mx, my);
+        // If we're controlling remote, capture mouse movement and send delta
+        if control_active {
+            let edge_pos = *EDGE_LOCK_POS.read().unwrap();
+            let (remote_x, remote_y) = *REMOTE_MOUSE_POS.read().unwrap();
             
-            // If we're controlling remote, send mouse position
-            if control_active {
-                send_mouse_to_remote(mx, my).await;
-            } else {
-                // Check for edge transition
+            // Calculate delta from edge position
+            let delta_x = mx - edge_pos.0;
+            let delta_y = my - edge_pos.1;
+            
+            // Only send if there's actual movement
+            if delta_x != 0 || delta_y != 0 {
+                // Update remote mouse position
+                let new_remote_x = remote_x + delta_x;
+                let new_remote_y = remote_y + delta_y;
+                
+                // Clamp to remote screen bounds
+                let remote_screens = REMOTE_SCREENS.read().unwrap().clone();
+                let remote_min_x = remote_screens.iter().map(|s| s.x).min().unwrap_or(0);
+                let remote_max_x = remote_screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                let remote_min_y = remote_screens.iter().map(|s| s.y).min().unwrap_or(0);
+                let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+                
+                let clamped_x = new_remote_x.clamp(remote_min_x, remote_max_x - 1);
+                let clamped_y = new_remote_y.clamp(remote_min_y, remote_max_y - 1);
+                
+                // Store new remote position
+                *REMOTE_MOUSE_POS.write().unwrap() = (clamped_x, clamped_y);
+                
+                // Send to remote
+                send_mouse_to_remote(clamped_x, clamped_y).await;
+                
+                // Move local mouse back to edge position
+                crate::input::move_mouse(edge_pos.0, edge_pos.1);
+                
+                // Check if we should return control (mouse moved back towards local screens)
+                // If delta is moving away from the edge (back into local screens), release control
+                let screens = crate::input::get_all_screens();
+                let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+                let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                
+                // At right edge and moving left? Or remote mouse hit left edge?
+                if edge_pos.0 >= total_max_x - 20 && clamped_x <= remote_min_x + 5 {
+                    println!("🔙 Remote mouse hit left edge, returning control to local");
+                    *CONTROL_ACTIVE.write().unwrap() = false;
+                    // Send control_end to remote
+                    send_control_message("control_end", 0, 0).await;
+                }
+                // At left edge and moving right? Or remote mouse hit right edge?
+                else if edge_pos.0 <= total_min_x + 20 && clamped_x >= remote_max_x - 5 {
+                    println!("🔙 Remote mouse hit right edge, returning control to local");
+                    *CONTROL_ACTIVE.write().unwrap() = false;
+                    send_control_message("control_end", 0, 0).await;
+                }
+            }
+            
+            last_pos = (mx, my);
+        } else {
+            // Not controlling - check for edge transition
+            if mx != last_pos.0 || my != last_pos.1 {
+                last_pos = (mx, my);
                 check_edge_transition(mx, my, edge_threshold).await;
             }
         }
@@ -813,6 +869,12 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     let remote_screens = REMOTE_SCREENS.read().unwrap().clone();
     if remote_screens.is_empty() { return; }
     
+    // Calculate remote screen bounds
+    let remote_min_x = remote_screens.iter().map(|s| s.x).min().unwrap_or(0);
+    let remote_max_x = remote_screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+    let remote_min_y = remote_screens.iter().map(|s| s.y).min().unwrap_or(0);
+    let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+    
     // Check edges
     let at_right_edge = mx >= total_max_x - threshold;
     let at_left_edge = mx <= total_min_x + threshold;
@@ -820,23 +882,48 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     let at_bottom_edge = my >= total_max_y - threshold;
     
     if at_right_edge || at_left_edge || at_top_edge || at_bottom_edge {
-        println!("🎯 Edge detected! Transitioning control to remote...");
+        println!("🎯 Edge detected! Local bounds: x={}-{}, y={}-{}", total_min_x, total_max_x, total_min_y, total_max_y);
+        println!("   Remote bounds: x={}-{}, y={}-{}", remote_min_x, remote_max_x, remote_min_y, remote_max_y);
         
-        // Calculate starting position on remote
+        // Calculate relative position (0.0 to 1.0) on local screens
+        let local_height = (total_max_y - total_min_y) as f64;
+        let local_width = (total_max_x - total_min_x) as f64;
+        let relative_y = if local_height > 0.0 { (my - total_min_y) as f64 / local_height } else { 0.5 };
+        let relative_x = if local_width > 0.0 { (mx - total_min_x) as f64 / local_width } else { 0.5 };
+        
+        // Convert to remote coordinates
+        let remote_height = (remote_max_y - remote_min_y) as f64;
+        let remote_width = (remote_max_x - remote_min_x) as f64;
+        
         let (remote_x, remote_y) = if at_right_edge {
-            // Enter remote from left side
-            let remote_min_x = remote_screens.iter().map(|s| s.x).min().unwrap_or(0);
-            (remote_min_x + 10, my)
+            // Enter remote from left side, map Y proportionally
+            let mapped_y = remote_min_y + (relative_y * remote_height) as i32;
+            (remote_min_x + 10, mapped_y.clamp(remote_min_y, remote_max_y - 1))
         } else if at_left_edge {
-            // Enter remote from right side  
-            let remote_max_x = remote_screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
-            (remote_max_x - 10, my)
+            // Enter remote from right side, map Y proportionally
+            let mapped_y = remote_min_y + (relative_y * remote_height) as i32;
+            (remote_max_x - 10, mapped_y.clamp(remote_min_y, remote_max_y - 1))
         } else if at_top_edge {
-            (mx, 10)
+            // Enter remote from bottom, map X proportionally
+            let mapped_x = remote_min_x + (relative_x * remote_width) as i32;
+            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_min_y + 10)
         } else {
-            let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
-            (mx, remote_max_y - 10)
+            // Enter remote from top, map X proportionally
+            let mapped_x = remote_min_x + (relative_x * remote_width) as i32;
+            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_max_y - 10)
         };
+        
+        println!("   Mapping local ({}, {}) -> remote ({}, {})", mx, my, remote_x, remote_y);
+        
+        // Calculate edge lock position (where to keep local mouse pinned)
+        let edge_x = if at_right_edge { total_max_x - 1 } else if at_left_edge { total_min_x + 1 } else { mx };
+        let edge_y = if at_top_edge { total_min_y + 1 } else if at_bottom_edge { total_max_y - 1 } else { my };
+        
+        // Store edge lock position and initial remote mouse position
+        *EDGE_LOCK_POS.write().unwrap() = (edge_x, edge_y);
+        *REMOTE_MOUSE_POS.write().unwrap() = (remote_x, remote_y);
+        
+        println!("   Edge lock at ({}, {}), remote starts at ({}, {})", edge_x, edge_y, remote_x, remote_y);
         
         // Take control of remote
         *CONTROL_ACTIVE.write().unwrap() = true;
@@ -844,9 +931,7 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
         // Send control_start message
         send_control_message("control_start", remote_x, remote_y).await;
         
-        // Move local mouse to edge (so it stays there)
-        let edge_x = if at_right_edge { total_max_x - 1 } else if at_left_edge { total_min_x + 1 } else { mx };
-        let edge_y = if at_top_edge { total_min_y + 1 } else if at_bottom_edge { total_max_y - 1 } else { my };
+        // Move local mouse to edge position
         crate::input::move_mouse(edge_x, edge_y);
     }
 }
