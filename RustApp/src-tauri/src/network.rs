@@ -41,6 +41,8 @@ pub static BEING_CONTROLLED: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false
 pub static EDGE_LOCK_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new((0, 0)));
 // Current remote mouse position (tracked locally)
 pub static REMOTE_MOUSE_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new((0, 0)));
+// Timestamp when control started (to prevent immediate return)
+pub static CONTROL_START_TIME: Lazy<RwLock<u64>> = Lazy::new(|| RwLock::new(0));
 
 // Debug state for UI
 pub static DEBUG_INFO: Lazy<RwLock<DebugInfo>> = Lazy::new(|| RwLock::new(DebugInfo::default()));
@@ -850,24 +852,32 @@ pub async fn start_mouse_tracking() {
                 // Move local mouse back to edge position
                 crate::input::move_mouse(edge_pos.0, edge_pos.1);
                 
-                // Check if we should return control (mouse moved back towards local screens)
-                // If delta is moving away from the edge (back into local screens), release control
-                let screens = crate::input::get_all_screens();
-                let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
-                let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                // Check if we should return control (but not immediately after starting!)
+                // Wait at least 500ms before allowing return to prevent immediate snap-back
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let start_time = *CONTROL_START_TIME.read().unwrap();
+                let elapsed = now - start_time;
                 
-                // At right edge and moving left? Or remote mouse hit left edge?
-                if edge_pos.0 >= total_max_x - 20 && clamped_x <= remote_min_x + 5 {
-                    println!("🔙 Remote mouse hit left edge, returning control to local");
-                    *CONTROL_ACTIVE.write().unwrap() = false;
-                    // Send control_end to remote
-                    send_control_message("control_end", 0, 0).await;
-                }
-                // At left edge and moving right? Or remote mouse hit right edge?
-                else if edge_pos.0 <= total_min_x + 20 && clamped_x >= remote_max_x - 5 {
-                    println!("🔙 Remote mouse hit right edge, returning control to local");
-                    *CONTROL_ACTIVE.write().unwrap() = false;
-                    send_control_message("control_end", 0, 0).await;
+                if elapsed > 500 {  // Only check for return after 500ms
+                    let screens = crate::input::get_all_screens();
+                    let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+                    let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                    
+                    // At right edge and remote mouse hit left edge? Return to local
+                    if edge_pos.0 >= total_max_x - 20 && clamped_x <= remote_min_x + 5 {
+                        println!("🔙 Remote mouse hit left edge, returning control to local");
+                        *CONTROL_ACTIVE.write().unwrap() = false;
+                        send_control_message("control_end", 0, 0).await;
+                    }
+                    // At left edge and remote mouse hit right edge? Return to local
+                    else if edge_pos.0 <= total_min_x + 20 && clamped_x >= remote_max_x - 5 {
+                        println!("🔙 Remote mouse hit right edge, returning control to local");
+                        *CONTROL_ACTIVE.write().unwrap() = false;
+                        send_control_message("control_end", 0, 0).await;
+                    }
                 }
             }
             
@@ -949,6 +959,13 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
         // Store edge lock position and initial remote mouse position
         *EDGE_LOCK_POS.write().unwrap() = (edge_x, edge_y);
         *REMOTE_MOUSE_POS.write().unwrap() = (remote_x, remote_y);
+        
+        // Record start time for cooldown
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        *CONTROL_START_TIME.write().unwrap() = now;
         
         println!("   Edge lock at ({}, {}), remote starts at ({}, {})", edge_x, edge_y, remote_x, remote_y);
         
