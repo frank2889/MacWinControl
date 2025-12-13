@@ -233,6 +233,21 @@ pub async fn start_server(port: u16) -> Result<(), Box<dyn std::error::Error + S
     
     loop {
         let (stream, addr) = listener.accept().await?;
+        
+        // Check if we're already connected - reject duplicate connections
+        let already_connected = *IS_CONNECTED.read().unwrap();
+        let current_peer = CONNECTED_TO.read().unwrap().clone();
+        
+        if already_connected {
+            if let Some(ref peer) = current_peer {
+                if peer == &addr.ip().to_string() {
+                    println!("⚠️ Duplicate connection from {} - closing", addr);
+                    drop(stream);
+                    continue;
+                }
+            }
+        }
+        
         println!("📥 New incoming connection from: {}", addr);
         
         // Split the stream into read and write halves (just like connect_to_server does)
@@ -315,9 +330,15 @@ async fn handle_client_read_loop(
         match reader.read_line(&mut line).await {
             Ok(0) => {
                 println!("📤 Client {} disconnected", addr);
-                *IS_CONNECTED.write().unwrap() = false;
-                *CONNECTED_TO.write().unwrap() = None;
-                *WRITE_STREAM.write().unwrap() = None;
+                // Only clear state if this was our primary connection
+                let is_outgoing = *IS_OUTGOING_CONNECTION.read().unwrap();
+                if !is_outgoing {
+                    // We were server, this client left - clear everything
+                    *IS_CONNECTED.write().unwrap() = false;
+                    *CONNECTED_TO.write().unwrap() = None;
+                    *WRITE_STREAM.write().unwrap() = None;
+                }
+                // If we have an outgoing connection, don't clear state - we're still connected
                 break;
             }
             Ok(_) => {
@@ -330,7 +351,12 @@ async fn handle_client_read_loop(
             }
             Err(e) => {
                 eprintln!("Read error from {}: {}", addr, e);
-                *IS_CONNECTED.write().unwrap() = false;
+                let is_outgoing = *IS_OUTGOING_CONNECTION.read().unwrap();
+                if !is_outgoing {
+                    *IS_CONNECTED.write().unwrap() = false;
+                    *CONNECTED_TO.write().unwrap() = None;
+                    *WRITE_STREAM.write().unwrap() = None;
+                }
                 break;
             }
         }
@@ -499,6 +525,7 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<(), Box<dyn std::e
                     *IS_CONNECTED.write().unwrap() = false;
                     *CONNECTED_TO.write().unwrap() = None;
                     *WRITE_STREAM.write().unwrap() = None;
+                    *IS_OUTGOING_CONNECTION.write().unwrap() = false;  // Reset outgoing flag
                     break;
                 }
                 Ok(_) => {
@@ -511,6 +538,9 @@ pub async fn connect_to_server(ip: &str, port: u16) -> Result<(), Box<dyn std::e
                 Err(e) => {
                     eprintln!("Read error: {}", e);
                     *IS_CONNECTED.write().unwrap() = false;
+                    *CONNECTED_TO.write().unwrap() = None;
+                    *WRITE_STREAM.write().unwrap() = None;
+                    *IS_OUTGOING_CONNECTION.write().unwrap() = false;  // Reset outgoing flag
                     break;
                 }
             }
@@ -630,6 +660,8 @@ async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Er
     println!("👂 Listening for peers on UDP port {}", UDP_PORT);
     
     let mut buffer = [0u8; 1024];
+    let mut last_log_time: u64 = 0;  // Rate limit discovery logs
+    let mut connecting = false;  // Prevent multiple simultaneous connection attempts
     
     loop {
         let (len, _addr) = socket.recv_from(&mut buffer).await?;
@@ -647,7 +679,16 @@ async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Er
                 continue;
             }
             
-            println!("🔍 Discovered peer: {} ({}) at {}", peer_name, peer_type, peer_ip);
+            // Rate limit discovery logs (once every 30 seconds)
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            
+            if now - last_log_time >= 30 {
+                println!("🔍 Discovered peer: {} ({}) at {}", peer_name, peer_type, peer_ip);
+                last_log_time = now;
+            }
             
             // Update discovered peers list
             let now = std::time::SystemTime::now()
@@ -669,25 +710,41 @@ async fn start_udp_listener(local_ip: &str) -> Result<(), Box<dyn std::error::Er
                 }
             }
             
-            // Auto-connect if we don't have a write stream yet
-            // (incoming connections don't give us a write stream for sending)
+            // Auto-connect if we don't have a connection yet
+            // Only connect if:
+            // 1. We don't have a write stream (no outgoing connection)
+            // 2. We're not already connected
+            // 3. We're not currently trying to connect
+            // 4. Our IP is higher than peer's (leadership election to prevent both sides connecting)
+            let already_connected = *IS_CONNECTED.read().unwrap();
             let has_write_stream = WRITE_STREAM.read().unwrap().is_some();
-            if !has_write_stream {
-                println!("🔗 Auto-connecting to {}...", peer_ip);
+            
+            // Leadership election: only the machine with the higher IP initiates the connection
+            // This prevents both machines from trying to connect simultaneously
+            let should_initiate = local_ip > peer_ip.as_str();
+            
+            if !already_connected && !has_write_stream && !connecting && should_initiate {
+                connecting = true;
+                println!("🔗 Auto-connecting to {} (we have higher IP)...", peer_ip);
                 
                 let peer_ip_clone = peer_ip.clone();
-                tokio::spawn(async move {
-                    match connect_to_server(&peer_ip_clone, TCP_PORT).await {
-                        Ok(_) => {
-                            println!("✅ Connected to {}", peer_ip_clone);
-                            *IS_CONNECTED.write().unwrap() = true;
-                            *CONNECTED_TO.write().unwrap() = Some(peer_ip_clone);
-                        }
-                        Err(e) => {
-                            println!("❌ Failed to connect: {}", e);
-                        }
+                match connect_to_server(&peer_ip_clone, TCP_PORT).await {
+                    Ok(_) => {
+                        println!("✅ Connected to {}", peer_ip_clone);
                     }
-                });
+                    Err(e) => {
+                        println!("❌ Failed to connect: {}", e);
+                        // Wait a bit before trying again
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
+                }
+                connecting = false;
+            } else if !already_connected && !has_write_stream && !should_initiate {
+                // We wait for the other side to connect to us
+                // Just log once per discovery
+                if now - last_log_time >= 30 {
+                    println!("⏳ Waiting for {} to connect (they have higher IP)", peer_ip);
+                }
             }
         }
     }
@@ -736,8 +793,8 @@ pub async fn start_mouse_tracking() {
         
         let (mx, my) = crate::input::get_mouse_position();
         
-        // Log every 5 seconds to verify loop is running
-        if loop_counter % 300 == 0 {
+        // Log every 60 seconds to verify loop is running (reduce log spam)
+        if loop_counter % 7500 == 0 {
             println!("🔄 Mouse tracking alive: pos=({},{}) connected={}", mx, my, is_connected);
         }
         
