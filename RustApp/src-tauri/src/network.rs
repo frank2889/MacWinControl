@@ -754,7 +754,7 @@ pub async fn start_mouse_tracking() {
     let mut loop_counter = 0u64;
     
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;  // ~60 Hz (slowed down)
+        tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;  // ~125 Hz for lower latency
         
         loop_counter += 1;
         
@@ -824,12 +824,22 @@ pub async fn start_mouse_tracking() {
             let edge_pos = *EDGE_LOCK_POS.read().unwrap();
             let (remote_x, remote_y) = *REMOTE_MOUSE_POS.read().unwrap();
             
-            // Calculate delta from where mouse was last frame
-            let delta_x = mx - last_pos.0;
-            let delta_y = my - last_pos.1;
+            // Calculate delta from edge position (mouse always gets reset to edge)
+            // So delta = current position - edge position
+            let raw_delta_x = mx - edge_pos.0;
+            let raw_delta_y = my - edge_pos.1;
+            
+            // Apply sensitivity multiplier for more responsive feel
+            let sensitivity = 1.5;
+            let delta_x = (raw_delta_x as f64 * sensitivity) as i32;
+            let delta_y = (raw_delta_y as f64 * sensitivity) as i32;
             
             // Only send if there's actual movement
-            if delta_x != 0 || delta_y != 0 {
+            if raw_delta_x != 0 || raw_delta_y != 0 {
+                // Debug: show delta calculation
+                println!("🎯 Delta: raw({},{}) -> scaled({},{}) | edge({},{}) mouse({},{})", 
+                    raw_delta_x, raw_delta_y, delta_x, delta_y, edge_pos.0, edge_pos.1, mx, my);
+                
                 // Update remote mouse position with the delta
                 let new_remote_x = remote_x + delta_x;
                 let new_remote_y = remote_y + delta_y;
