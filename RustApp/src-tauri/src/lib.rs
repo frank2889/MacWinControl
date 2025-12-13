@@ -225,6 +225,35 @@ fn set_remote_screens(screens: Vec<RemoteScreenInfo>, state: State<'_, Arc<Mutex
     Ok(())
 }
 
+#[tauri::command]
+fn set_screen_layout(remote_edge: String) -> Result<(), String> {
+    // Set which edge leads to remote screens
+    // Valid values: "right", "left", "top", "bottom"
+    let valid_edges = ["right", "left", "top", "bottom"];
+    if !valid_edges.contains(&remote_edge.as_str()) {
+        return Err(format!("Invalid edge: {}. Must be one of: {:?}", remote_edge, valid_edges));
+    }
+    *network::REMOTE_EDGE.write().unwrap() = remote_edge.clone();
+    println!("📐 Screen layout updated: Windows is to the {} of Mac", remote_edge);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_screen_layout() -> String {
+    network::REMOTE_EDGE.read().unwrap().clone()
+}
+
+#[tauri::command]
+fn get_synced_layout() -> Option<String> {
+    network::SYNCED_LAYOUT.read().unwrap().clone()
+}
+
+#[tauri::command]
+async fn send_layout_sync(layout_json: String) -> Result<(), String> {
+    // Send layout to connected peer
+    network::send_layout_sync(&layout_json).await.map_err(|e| e.to_string())
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DebugInfoResponse {
     pub mouse_x: i32,
@@ -295,6 +324,10 @@ pub fn run() {
             is_server,
             get_remote_screens,
             set_remote_screens,
+            set_screen_layout,
+            get_screen_layout,
+            get_synced_layout,
+            send_layout_sync,
             get_connection_status,
             get_debug_info,
         ])

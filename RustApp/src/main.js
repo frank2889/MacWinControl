@@ -24,13 +24,120 @@ function loadSavedLayout() {
     }
 }
 
-// Save layout to localStorage
-function saveLayout() {
+// Save layout to localStorage and update Rust backend
+async function saveLayout() {
     try {
         localStorage.setItem('macwincontrol_layout', JSON.stringify(savedLayout));
         console.log('Saved layout:', savedLayout);
+        
+        // Calculate which edge leads to Windows based on saved positions
+        await updateRemoteEdge();
+        
+        // Send layout to remote peer so they see the same layout
+        await syncLayoutToRemote();
     } catch (e) {
         console.error('Failed to save layout:', e);
+    }
+}
+
+// Send layout to remote peer
+async function syncLayoutToRemote() {
+    if (!savedLayout) return;
+    try {
+        const layoutJson = JSON.stringify(savedLayout);
+        await invoke('send_layout_sync', { layoutJson });
+        console.log('Layout synced to remote');
+    } catch (e) {
+        // Silently ignore if not connected
+        console.log('Could not sync layout:', e);
+    }
+}
+
+// Check for synced layout from remote
+async function checkSyncedLayout() {
+    try {
+        const syncedLayout = await invoke('get_synced_layout');
+        if (syncedLayout && syncedLayout !== lastSyncedLayout) {
+            lastSyncedLayout = syncedLayout;
+            const parsed = JSON.parse(syncedLayout);
+            console.log('Received synced layout from remote:', parsed);
+            
+            // Merge with our saved layout (remote layout takes precedence)
+            savedLayout = { ...savedLayout, ...parsed };
+            localStorage.setItem('macwincontrol_layout', JSON.stringify(savedLayout));
+            
+            // Re-render with new layout
+            renderScreenLayout();
+            await updateRemoteEdge();
+        }
+    } catch (e) {
+        // Silently ignore
+    }
+}
+
+let lastSyncedLayout = null;
+
+// Determine which edge of Mac leads to Windows and tell Rust
+async function updateRemoteEdge() {
+    if (!savedLayout || localScreens.length === 0 || remoteScreens.length === 0) return;
+    
+    // Calculate local (Mac) screen bounds (normalized)
+    const localMinX = Math.min(...localScreens.map(s => s.x));
+    const localMinY = Math.min(...localScreens.map(s => s.y));
+    const localMaxX = Math.max(...localScreens.map(s => s.x + s.width)) - localMinX;
+    const localMaxY = Math.max(...localScreens.map(s => s.y + s.height)) - localMinY;
+    
+    // Find remote (Windows) screens in saved layout
+    let remoteMinX = Infinity, remoteMaxX = -Infinity;
+    let remoteMinY = Infinity, remoteMaxY = -Infinity;
+    
+    remoteScreens.forEach((s, i) => {
+        const id = `remote-${s.computer_name}-${i}`;
+        const pos = savedLayout[id];
+        if (pos) {
+            remoteMinX = Math.min(remoteMinX, pos.x);
+            remoteMaxX = Math.max(remoteMaxX, pos.x + s.width);
+            remoteMinY = Math.min(remoteMinY, pos.y);
+            remoteMaxY = Math.max(remoteMaxY, pos.y + s.height);
+        }
+    });
+    
+    if (remoteMinX === Infinity) {
+        // No saved positions, default to right
+        try {
+            await invoke('set_screen_layout', { remoteEdge: 'right' });
+        } catch (e) {
+            console.error('Failed to set screen layout:', e);
+        }
+        return;
+    }
+    
+    // Determine edge: compare center of remote screens to center of local screens
+    const localCenterX = localMaxX / 2;
+    const localCenterY = localMaxY / 2;
+    const remoteCenterX = (remoteMinX + remoteMaxX) / 2;
+    const remoteCenterY = (remoteMinY + remoteMaxY) / 2;
+    
+    // Calculate horizontal and vertical offset
+    const deltaX = remoteCenterX - localCenterX;
+    const deltaY = remoteCenterY - localCenterY;
+    
+    let remoteEdge;
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        // Horizontal dominates
+        remoteEdge = deltaX > 0 ? 'right' : 'left';
+    } else {
+        // Vertical dominates
+        remoteEdge = deltaY > 0 ? 'bottom' : 'top';
+    }
+    
+    console.log(`Layout analysis: remote center (${remoteCenterX}, ${remoteCenterY}), local center (${localCenterX}, ${localCenterY})`);
+    console.log(`Remote edge determined: ${remoteEdge}`);
+    
+    try {
+        await invoke('set_screen_layout', { remoteEdge });
+    } catch (e) {
+        console.error('Failed to set screen layout:', e);
     }
 }
 
@@ -49,6 +156,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(loadRemoteScreens, 2000);
     setInterval(loadConnectionStatus, 1000);
     setInterval(loadDebugInfo, 500);  // Debug info polling
+    setInterval(checkSyncedLayout, 1000);  // Check for layout sync from remote
 });
 
 async function loadConnectionStatus() {
@@ -117,6 +225,8 @@ async function loadRemoteScreens() {
         console.log('Remote screens:', remoteScreens);
         if (remoteScreens.length > 0) {
             renderScreenLayout();
+            // Update the edge configuration based on current layout
+            await updateRemoteEdge();
         }
     } catch (err) {
         console.error('Failed to load remote screens:', err);

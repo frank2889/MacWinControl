@@ -44,6 +44,13 @@ pub static REMOTE_MOUSE_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new
 // Timestamp when control started (to prevent immediate return)
 pub static CONTROL_START_TIME: Lazy<RwLock<u64>> = Lazy::new(|| RwLock::new(0));
 
+// Screen layout configuration - which edge leads to which computer
+// Format: "right" means Windows is to the right of Mac
+pub static REMOTE_EDGE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("right".to_string()));
+
+// Synced layout from remote (JSON string of screen positions)
+pub static SYNCED_LAYOUT: Lazy<RwLock<Option<String>>> = Lazy::new(|| RwLock::new(None));
+
 // Debug state for UI
 pub static DEBUG_INFO: Lazy<RwLock<DebugInfo>> = Lazy::new(|| RwLock::new(DebugInfo::default()));
 
@@ -121,6 +128,9 @@ pub struct Message {
     
     #[serde(skip_serializing_if = "Option::is_none")]
     pub computer_type: Option<String>,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,  // JSON string of saved layout positions
 }
 
 impl Message {
@@ -132,7 +142,7 @@ impl Message {
             screens: Some(screens),
             computer_type: Some(computer_type.to_string()),
             x: None, y: None, button: None, action: None, 
-            key_code: None, text: None,
+            key_code: None, text: None, layout: None,
         }
     }
     
@@ -142,7 +152,7 @@ impl Message {
             name: Some(name.to_string()),
             version: Some("1.0".to_string()),
             x: None, y: None, button: None, action: None, 
-            key_code: None, text: None, screens: None, computer_type: None,
+            key_code: None, text: None, screens: None, computer_type: None, layout: None,
         }
     }
     
@@ -153,7 +163,7 @@ impl Message {
             y: Some(y),
             button: None, action: None, key_code: None, 
             text: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         }
     }
     
@@ -164,7 +174,7 @@ impl Message {
             action: Some(action.to_string()),
             x: None, y: None, key_code: None, 
             text: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         }
     }
     
@@ -175,7 +185,7 @@ impl Message {
             action: Some(action.to_string()),
             x: None, y: None, button: None, 
             text: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         }
     }
     
@@ -185,7 +195,7 @@ impl Message {
             text: Some(text.to_string()),
             x: None, y: None, button: None, action: None, 
             key_code: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         }
     }
     
@@ -194,13 +204,23 @@ impl Message {
             msg_type: "ping".to_string(),
             x: None, y: None, button: None, action: None, 
             key_code: None, text: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         }
     }
     
     pub fn pong() -> Self {
         Message {
             msg_type: "pong".to_string(),
+            x: None, y: None, button: None, action: None, 
+            key_code: None, text: None, name: None, version: None,
+            screens: None, computer_type: None, layout: None,
+        }
+    }
+    
+    pub fn layout_sync(layout_json: &str) -> Self {
+        Message {
+            msg_type: "layout_sync".to_string(),
+            layout: Some(layout_json.to_string()),
             x: None, y: None, button: None, action: None, 
             key_code: None, text: None, name: None, version: None,
             screens: None, computer_type: None,
@@ -400,6 +420,13 @@ async fn handle_message(
             println!("🔓 Remote released control");
             *BEING_CONTROLLED.write().unwrap() = false;
         }
+        "layout_sync" => {
+            // Remote is sending their screen layout
+            if let Some(layout) = &msg.layout {
+                println!("📐 Received layout sync: {}", layout);
+                *SYNCED_LAYOUT.write().unwrap() = Some(layout.clone());
+            }
+        }
         _ => {
             println!("Unknown message type: {}", msg.msg_type);
         }
@@ -446,6 +473,12 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
         "control_end" => {
             println!("🔓 Remote released control");
             *BEING_CONTROLLED.write().unwrap() = false;
+        }
+        "layout_sync" => {
+            if let Some(layout) = &msg.layout {
+                println!("📐 Received layout sync: {}", layout);
+                *SYNCED_LAYOUT.write().unwrap() = Some(layout.clone());
+            }
         }
         "mouse_move" => {
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
@@ -935,72 +968,104 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     let remote_min_y = remote_screens.iter().map(|s| s.y).min().unwrap_or(0);
     let remote_max_y = remote_screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
     
-    // Check edges
+    // Get configured edge direction (which edge leads to Windows)
+    let remote_edge = REMOTE_EDGE.read().unwrap().clone();
+    
+    // Check edges - but only the configured one
     let at_right_edge = mx >= total_max_x - threshold;
     let at_left_edge = mx <= total_min_x + threshold;
     let at_top_edge = my <= total_min_y + threshold;
     let at_bottom_edge = my >= total_max_y - threshold;
     
-    if at_right_edge || at_left_edge || at_top_edge || at_bottom_edge {
-        println!("🎯 Edge detected! Local bounds: x={}-{}, y={}-{}", total_min_x, total_max_x, total_min_y, total_max_y);
-        println!("   Remote bounds: x={}-{}, y={}-{}", remote_min_x, remote_max_x, remote_min_y, remote_max_y);
-        
-        // Calculate relative position (0.0 to 1.0) on local screens
-        let local_height = (total_max_y - total_min_y) as f64;
-        let local_width = (total_max_x - total_min_x) as f64;
-        let relative_y = if local_height > 0.0 { (my - total_min_y) as f64 / local_height } else { 0.5 };
-        let relative_x = if local_width > 0.0 { (mx - total_min_x) as f64 / local_width } else { 0.5 };
-        
-        // Convert to remote coordinates
-        let remote_height = (remote_max_y - remote_min_y) as f64;
-        let remote_width = (remote_max_x - remote_min_x) as f64;
-        
-        let (remote_x, remote_y) = if at_right_edge {
+    // Only trigger on the correct edge based on layout
+    let should_transition = match remote_edge.as_str() {
+        "right" => at_right_edge,
+        "left" => at_left_edge,
+        "top" => at_top_edge,
+        "bottom" => at_bottom_edge,
+        _ => at_right_edge  // Default to right
+    };
+    
+    if !should_transition {
+        return;
+    }
+    
+    println!("🎯 Edge detected ({})! Local bounds: x={}-{}, y={}-{}", remote_edge, total_min_x, total_max_x, total_min_y, total_max_y);
+    println!("   Remote bounds: x={}-{}, y={}-{}", remote_min_x, remote_max_x, remote_min_y, remote_max_y);
+    
+    // Calculate relative position (0.0 to 1.0) on local screens
+    let local_height = (total_max_y - total_min_y) as f64;
+    let local_width = (total_max_x - total_min_x) as f64;
+    let relative_y = if local_height > 0.0 { (my - total_min_y) as f64 / local_height } else { 0.5 };
+    let relative_x = if local_width > 0.0 { (mx - total_min_x) as f64 / local_width } else { 0.5 };
+    
+    // Convert to remote coordinates based on which edge we're crossing
+    let remote_height = (remote_max_y - remote_min_y) as f64;
+    let remote_width = (remote_max_x - remote_min_x) as f64;
+    
+    let (remote_x, remote_y) = match remote_edge.as_str() {
+        "right" => {
             // Enter remote from left side, map Y proportionally
             let mapped_y = remote_min_y + (relative_y * remote_height) as i32;
             (remote_min_x + 10, mapped_y.clamp(remote_min_y, remote_max_y - 1))
-        } else if at_left_edge {
+        },
+        "left" => {
             // Enter remote from right side, map Y proportionally
             let mapped_y = remote_min_y + (relative_y * remote_height) as i32;
             (remote_max_x - 10, mapped_y.clamp(remote_min_y, remote_max_y - 1))
-        } else if at_top_edge {
+        },
+        "top" => {
             // Enter remote from bottom, map X proportionally
             let mapped_x = remote_min_x + (relative_x * remote_width) as i32;
-            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_min_y + 10)
-        } else {
+            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_max_y - 10)
+        },
+        "bottom" => {
             // Enter remote from top, map X proportionally
             let mapped_x = remote_min_x + (relative_x * remote_width) as i32;
-            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_max_y - 10)
-        };
-        
-        println!("   Mapping local ({}, {}) -> remote ({}, {})", mx, my, remote_x, remote_y);
-        
-        // Calculate edge lock position (where to keep local mouse pinned)
-        let edge_x = if at_right_edge { total_max_x - 1 } else if at_left_edge { total_min_x + 1 } else { mx };
-        let edge_y = if at_top_edge { total_min_y + 1 } else if at_bottom_edge { total_max_y - 1 } else { my };
-        
-        // Store edge lock position and initial remote mouse position
-        *EDGE_LOCK_POS.write().unwrap() = (edge_x, edge_y);
-        *REMOTE_MOUSE_POS.write().unwrap() = (remote_x, remote_y);
-        
-        // Record start time for cooldown
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        *CONTROL_START_TIME.write().unwrap() = now;
-        
-        println!("   Edge lock at ({}, {}), remote starts at ({}, {})", edge_x, edge_y, remote_x, remote_y);
-        
-        // Take control of remote
-        *CONTROL_ACTIVE.write().unwrap() = true;
-        
-        // Send control_start message
-        send_control_message("control_start", remote_x, remote_y).await;
-        
-        // Move local mouse to edge position
-        crate::input::move_mouse(edge_x, edge_y);
-    }
+            (mapped_x.clamp(remote_min_x, remote_max_x - 1), remote_min_y + 10)
+        },
+        _ => {
+            // Default: right edge
+            let mapped_y = remote_min_y + (relative_y * remote_height) as i32;
+            (remote_min_x + 10, mapped_y.clamp(remote_min_y, remote_max_y - 1))
+        }
+    };
+    
+    println!("   Mapping local ({}, {}) -> remote ({}, {})", mx, my, remote_x, remote_y);
+    
+    // Calculate edge lock position (where to keep local mouse pinned)
+    let edge_x = match remote_edge.as_str() {
+        "right" => total_max_x - 1,
+        "left" => total_min_x + 1,
+        _ => mx
+    };
+    let edge_y = match remote_edge.as_str() {
+        "top" => total_min_y + 1,
+        "bottom" => total_max_y - 1,
+        _ => my
+    };
+    
+    // Store edge lock position and initial remote mouse position
+    *EDGE_LOCK_POS.write().unwrap() = (edge_x, edge_y);
+    *REMOTE_MOUSE_POS.write().unwrap() = (remote_x, remote_y);
+    
+    // Record start time for cooldown
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    *CONTROL_START_TIME.write().unwrap() = now;
+    
+    println!("   Edge lock at ({}, {}), remote starts at ({}, {})", edge_x, edge_y, remote_x, remote_y);
+    
+    // Take control of remote
+    *CONTROL_ACTIVE.write().unwrap() = true;
+    
+    // Send control_start message
+    send_control_message("control_start", remote_x, remote_y).await;
+    
+    // Move local mouse to edge position
+    crate::input::move_mouse(edge_x, edge_y);
 }
 
 async fn send_mouse_to_remote(x: i32, y: i32) {
@@ -1032,7 +1097,7 @@ async fn send_control_message(msg_type: &str, x: i32, y: i32) {
             y: Some(y),
             button: None, action: None, key_code: None,
             text: None, name: None, version: None,
-            screens: None, computer_type: None,
+            screens: None, computer_type: None, layout: None,
         };
         let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
         println!("📤 Sending JSON: {}", json.trim());
@@ -1085,5 +1150,24 @@ pub async fn send_click_to_remote(button: &str, action: &str) {
 pub fn release_control() {
     *CONTROL_ACTIVE.write().unwrap() = false;
     println!("🔓 Control released back to local");
+}
+
+/// Send layout sync to remote
+pub async fn send_layout_sync(layout_json: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("📐 Sending layout sync: {}", layout_json);
+    
+    let writer = { WRITE_STREAM.read().unwrap().clone() };
+    
+    if let Some(writer) = writer {
+        let msg = Message::layout_sync(layout_json);
+        let json = serde_json::to_string(&msg)? + "\n";
+        let mut stream = writer.lock().await;
+        stream.write_all(json.as_bytes()).await?;
+        stream.flush().await?;
+        println!("✅ Layout sync sent successfully");
+        Ok(())
+    } else {
+        Err("No write stream available".into())
+    }
 }
 
