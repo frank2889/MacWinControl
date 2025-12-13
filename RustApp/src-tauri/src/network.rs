@@ -852,21 +852,25 @@ pub async fn start_mouse_tracking() {
             let edge_pos = *EDGE_LOCK_POS.read().unwrap();
             let (remote_x, remote_y) = *REMOTE_MOUSE_POS.read().unwrap();
             
-            // Calculate delta from edge position (mouse always gets reset to edge)
-            // So delta = current position - edge position
-            let raw_delta_x = mx - edge_pos.0;
-            let raw_delta_y = my - edge_pos.1;
+            // Calculate delta from LAST position (not edge, since move_mouse may fail)
+            let raw_delta_x = mx - last_pos.0;
+            let raw_delta_y = my - last_pos.1;
             
             // Apply sensitivity multiplier for more responsive feel
             let sensitivity = 1.5;
             let delta_x = (raw_delta_x as f64 * sensitivity) as i32;
             let delta_y = (raw_delta_y as f64 * sensitivity) as i32;
             
+            // Update last_pos for next iteration
+            last_pos = (mx, my);
+            
             // Only send if there's actual movement
             if raw_delta_x != 0 || raw_delta_y != 0 {
-                // Debug: show delta calculation
-                println!("🎯 Delta: raw({},{}) -> scaled({},{}) | edge({},{}) mouse({},{})", 
-                    raw_delta_x, raw_delta_y, delta_x, delta_y, edge_pos.0, edge_pos.1, mx, my);
+                // Debug: show delta calculation (reduced logging)
+                if loop_counter % 10 == 0 {
+                    println!("🎯 Delta: raw({},{}) -> scaled({},{}) | last({},{}) mouse({},{})", 
+                        raw_delta_x, raw_delta_y, delta_x, delta_y, last_pos.0 - raw_delta_x, last_pos.1 - raw_delta_y, mx, my);
+                }
                 
                 // Update remote mouse position with the delta
                 let new_remote_x = remote_x + delta_x;
@@ -895,13 +899,16 @@ pub async fn start_mouse_tracking() {
                 let _total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
                 
                 // Check for return to local (after cooldown)
+                // Use delta direction: if moving back towards local edge, return control
                 let should_return = if elapsed > 500 {
-                    // At right edge of local (went to Windows on the right) and remote going left past edge
-                    if edge_pos.0 >= total_max_x - 20 && new_remote_x < remote_min_x {
+                    // Went to right edge (Windows is right) and now moving left strongly
+                    if edge_pos.0 >= total_max_x - 20 && new_remote_x < remote_min_x + 50 && delta_x < -20 {
+                        println!("🔙 Detected return: moving left from right edge");
                         true
                     }
-                    // At left edge of local (went to Windows on the left) and remote going right past edge
-                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x > remote_max_x {
+                    // Went to left edge (Windows is left) and now moving right strongly
+                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x > remote_max_x - 50 && delta_x > 20 {
+                        println!("🔙 Detected return: moving right from left edge");
                         true
                     }
                     else { false }
@@ -912,9 +919,14 @@ pub async fn start_mouse_tracking() {
                     *CONTROL_ACTIVE.write().unwrap() = false;
                     send_control_message("control_end", 0, 0).await;
                     
-                    // Move local mouse back into the screen
-                    let return_x = if edge_pos.0 >= total_max_x - 20 { total_max_x - 50 } else { total_min_x + 50 };
-                    crate::input::move_mouse(return_x, edge_pos.1);
+                    // Move local mouse to center of the screen we came from
+                    let return_y = (screens[0].y + screens[0].height / 2).clamp(0, screens[0].y + screens[0].height - 1);
+                    let return_x = if edge_pos.0 >= total_max_x - 20 { 
+                        total_max_x - 100  // Come back from right
+                    } else { 
+                        total_min_x + 100  // Come back from left
+                    };
+                    crate::input::move_mouse(return_x, return_y);
                 } else {
                     // Clamp to remote screen bounds
                     let clamped_x = new_remote_x.clamp(remote_min_x, remote_max_x - 1);
@@ -927,12 +939,9 @@ pub async fn start_mouse_tracking() {
                     send_mouse_to_remote(clamped_x, clamped_y).await;
                 }
                 
-                // Always move local mouse back to edge position (keeps it hidden at edge)
-                crate::input::move_mouse(edge_pos.0, edge_pos.1);
+                // NOTE: We no longer try to move mouse back to edge
+                // Instead we track delta from last position
             }
-            
-            // Update last_pos to edge position (since we keep resetting there)
-            last_pos = (edge_pos.0, edge_pos.1);
         } else {
             // Not controlling - check for edge transition
             if mx != last_pos.0 || my != last_pos.1 {
