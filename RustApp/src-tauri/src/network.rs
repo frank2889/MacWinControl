@@ -378,6 +378,10 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
                 stream.write_all(json.as_bytes()).await?;
             }
         }
+        "pong" => {
+            // Heartbeat response received - connection is alive
+            // No action needed, just silently acknowledge
+        }
         "hello" => {
             if let Some(ref name) = msg.name {
                 let comp_type = msg.computer_type.clone().unwrap_or_else(|| "unknown".to_string());
@@ -408,8 +412,11 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
         }
         "control_start" => {
             // Remote is taking control of our mouse/keyboard
-            println!("🎮 Remote is taking control of our mouse!");
+            println!("🎮 =============================================");
+            println!("🎮 CONTROL_START: Remote is taking control!");
+            println!("🎮 =============================================");
             *BEING_CONTROLLED.write().unwrap() = true;
+            println!("🎮 BEING_CONTROLLED set to TRUE");
             
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
                 // Clamp to valid screen coordinates
@@ -430,11 +437,17 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
                 // Verify the move worked
                 let (actual_x, actual_y) = crate::input::get_mouse_position();
                 println!("   ✅ Actual position after move: ({}, {})", actual_x, actual_y);
+            } else {
+                println!("⚠️ control_start received without x,y coordinates!");
             }
+            println!("🎮 =============================================");
         }
         "control_end" => {
-            println!("🔓 Remote released control");
+            println!("🔓 =============================================");
+            println!("🔓 CONTROL_END: Remote released control");
             *BEING_CONTROLLED.write().unwrap() = false;
+            println!("🔓 BEING_CONTROLLED set to FALSE");
+            println!("🔓 =============================================");
         }
         "layout_sync" => {
             if let Some(layout) = &msg.layout {
@@ -447,10 +460,20 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
                 // Only move if we're being controlled by remote
                 let being_controlled = *BEING_CONTROLLED.read().unwrap();
                 if being_controlled {
-                    println!("🖱️ [handle_message_simple] Moving mouse to ({}, {})", x, y);
+                    // Log every 20th move to reduce spam
+                    static MOVE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let count = MOVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count % 20 == 0 {
+                        println!("🖱️ mouse_move to ({}, {}) [msg #{}]", x, y, count);
+                    }
                     crate::input::move_mouse(x, y);
                 } else {
-                    println!("⚠️ [handle_message_simple] Got mouse_move but BEING_CONTROLLED=false!");
+                    // Log this warning but not too often
+                    static WARN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let count = WARN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count < 5 || count % 100 == 0 {
+                        println!("⚠️ mouse_move ignored: BEING_CONTROLLED=false (warning #{}, pos=({},{}))", count, x, y);
+                    }
                 }
             }
         }
@@ -624,7 +647,55 @@ pub async fn start_auto_discovery() -> Result<(), Box<dyn std::error::Error + Se
         start_mouse_tracking().await;
     });
     
+    // Start heartbeat/ping to keep connection alive
+    tokio::spawn(async {
+        start_heartbeat().await;
+    });
+    
     Ok(())
+}
+
+/// Send periodic ping to keep connection alive and detect disconnects
+async fn start_heartbeat() {
+    println!("💓 Starting heartbeat task...");
+    let mut ping_count = 0u64;
+    
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        
+        let is_connected = *IS_CONNECTED.read().unwrap();
+        if !is_connected {
+            continue;
+        }
+        
+        // Send ping
+        let writer = { WRITE_STREAM.read().unwrap().clone() };
+        if let Some(writer) = writer {
+            let msg = Message::ping();
+            let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+            let mut stream = writer.lock().await;
+            match stream.write_all(json.as_bytes()).await {
+                Ok(_) => {
+                    let _ = stream.flush().await;
+                    ping_count += 1;
+                    if ping_count % 12 == 1 {  // Log once per minute
+                        println!("💓 Heartbeat ping #{} sent", ping_count);
+                    }
+                }
+                Err(e) => {
+                    println!("💔 Heartbeat failed, connection may be dead: {}", e);
+                    // Mark as disconnected to allow reconnection
+                    *IS_CONNECTED.write().unwrap() = false;
+                    *CONNECTED_TO.write().unwrap() = None;
+                    *WRITE_STREAM.write().unwrap() = None;
+                    *IS_OUTGOING_CONNECTION.write().unwrap() = false;
+                    *CONTROL_ACTIVE.write().unwrap() = false;
+                    *BEING_CONTROLLED.write().unwrap() = false;
+                    println!("🔌 Connection state cleared, waiting for reconnection...");
+                }
+            }
+        }
+    }
 }
 
 /// Broadcast our presence every 2 seconds
@@ -772,12 +843,16 @@ pub fn get_debug_info() -> DebugInfo {
 
 // ============= MOUSE TRACKING & EDGE DETECTION =============
 
+// Track last mouse position for delta calculation
+static LAST_MOUSE_POS: Lazy<RwLock<(i32, i32)>> = Lazy::new(|| RwLock::new((0, 0)));
+// Track if we need to reinitialize last_pos (after control starts)
+static NEEDS_POS_INIT: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(true));
+
 /// Start mouse tracking - monitors mouse position and handles edge transitions
 pub async fn start_mouse_tracking() {
     println!("🖱️ Starting mouse tracking...");
     
-    let mut last_pos = (0i32, 0i32);
-    let edge_threshold = 10;  // pixels from edge to trigger transition (increased for macOS)
+    let edge_threshold = 15;  // pixels from edge to trigger transition
     let mut debug_counter = 0u32;
     let mut loop_counter = 0u64;
     
@@ -795,12 +870,13 @@ pub async fn start_mouse_tracking() {
         
         // Log every 60 seconds to verify loop is running (reduce log spam)
         if loop_counter % 7500 == 0 {
-            println!("🔄 Mouse tracking alive: pos=({},{}) connected={}", mx, my, is_connected);
+            println!("🔄 Mouse tracking alive: pos=({},{}) connected={} ctrl={} being_ctrl={}", 
+                mx, my, is_connected, control_active, being_controlled);
         }
         
-        // Update debug info every ~0.5 seconds (every 30 iterations at 60Hz)
+        // Update debug info every ~0.5 seconds (every 60 iterations at 125Hz)
         debug_counter += 1;
-        if debug_counter >= 30 {
+        if debug_counter >= 60 {
             debug_counter = 0;
             let screens = crate::input::get_all_screens();
             let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
@@ -844,37 +920,48 @@ pub async fn start_mouse_tracking() {
         
         // Skip if we're being controlled (remote has our mouse)
         if being_controlled {
+            // Reset position init flag for when we regain control
+            *NEEDS_POS_INIT.write().unwrap() = true;
             continue;
         }
         
         // If we're controlling remote, capture mouse movement and send to remote
         if control_active {
-            let edge_pos = *EDGE_LOCK_POS.read().unwrap();
+            // Check if we need to initialize last_pos (first iteration after control started)
+            let needs_init = *NEEDS_POS_INIT.read().unwrap();
+            if needs_init {
+                *LAST_MOUSE_POS.write().unwrap() = (mx, my);
+                *NEEDS_POS_INIT.write().unwrap() = false;
+                println!("🎯 Initialized last_pos to ({}, {}) for delta tracking", mx, my);
+                continue;  // Skip this frame, start fresh next frame
+            }
+            
+            let last_pos = *LAST_MOUSE_POS.read().unwrap();
             let (remote_x, remote_y) = *REMOTE_MOUSE_POS.read().unwrap();
             
-            // Calculate delta from LAST position (not edge, since move_mouse may fail)
-            let raw_delta_x = mx - last_pos.0;
-            let raw_delta_y = my - last_pos.1;
+            // Calculate delta from LAST position
+            let delta_x = mx - last_pos.0;
+            let delta_y = my - last_pos.1;
             
-            // Apply sensitivity multiplier for more responsive feel
-            let sensitivity = 1.5;
-            let delta_x = (raw_delta_x as f64 * sensitivity) as i32;
-            let delta_y = (raw_delta_y as f64 * sensitivity) as i32;
-            
-            // Update last_pos for next iteration
-            last_pos = (mx, my);
+            // Update last_pos for next iteration BEFORE any early returns
+            *LAST_MOUSE_POS.write().unwrap() = (mx, my);
             
             // Only send if there's actual movement
-            if raw_delta_x != 0 || raw_delta_y != 0 {
+            if delta_x != 0 || delta_y != 0 {
+                // Apply sensitivity multiplier for more responsive feel
+                let sensitivity = 1.2;
+                let scaled_delta_x = (delta_x as f64 * sensitivity) as i32;
+                let scaled_delta_y = (delta_y as f64 * sensitivity) as i32;
+                
                 // Debug: show delta calculation (reduced logging)
-                if loop_counter % 10 == 0 {
-                    println!("🎯 Delta: raw({},{}) -> scaled({},{}) | last({},{}) mouse({},{})", 
-                        raw_delta_x, raw_delta_y, delta_x, delta_y, last_pos.0 - raw_delta_x, last_pos.1 - raw_delta_y, mx, my);
+                if loop_counter % 20 == 0 {
+                    println!("🎯 Delta: ({},{}) -> scaled({},{}) | remote({},{}) mouse({},{})", 
+                        delta_x, delta_y, scaled_delta_x, scaled_delta_y, remote_x, remote_y, mx, my);
                 }
                 
                 // Update remote mouse position with the delta
-                let new_remote_x = remote_x + delta_x;
-                let new_remote_y = remote_y + delta_y;
+                let new_remote_x = remote_x + scaled_delta_x;
+                let new_remote_y = remote_y + scaled_delta_y;
                 
                 // Get remote screen bounds
                 let remote_screens = REMOTE_SCREENS.read().unwrap().clone();
@@ -891,43 +978,43 @@ pub async fn start_mouse_tracking() {
                 let start_time = *CONTROL_START_TIME.read().unwrap();
                 let elapsed = now - start_time;
                 
-                // Get local screen info
+                // Get local screen info for determining which edge we came from
+                let edge_pos = *EDGE_LOCK_POS.read().unwrap();
                 let screens = crate::input::get_all_screens();
                 let total_min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
                 let total_max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
-                let _total_min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
-                let _total_max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
                 
-                // Check for return to local (after cooldown)
-                // Only return if remote mouse is at the LEFT edge of remote screens AND moving left
-                let should_return = if elapsed > 1000 {  // Increased cooldown to 1 second
-                    // Went to right edge (Windows is right) - return when at left edge of remote and moving left
-                    if edge_pos.0 >= total_max_x - 20 && new_remote_x <= remote_min_x + 10 && delta_x < -5 {
-                        println!("🔙 Detected return: at left edge of remote, moving left (remote_x={}, delta={})", new_remote_x, delta_x);
+                // Check for return to local (after 1.5 second cooldown to prevent immediate return)
+                let should_return = if elapsed > 1500 {
+                    // We went to right edge (Windows is right) - return when at left edge of remote and moving left
+                    if edge_pos.0 >= total_max_x - 30 && new_remote_x <= remote_min_x + 20 && delta_x < -3 {
+                        println!("🔙 Return detected: left edge of remote, moving left (x={}, delta={})", new_remote_x, delta_x);
                         true
                     }
-                    // Went to left edge (Windows is left) - return when at right edge of remote and moving right
-                    else if edge_pos.0 <= total_min_x + 20 && new_remote_x >= remote_max_x - 10 && delta_x > 5 {
-                        println!("🔙 Detected return: at right edge of remote, moving right");
+                    // We went to left edge (Windows is left) - return when at right edge of remote and moving right
+                    else if edge_pos.0 <= total_min_x + 30 && new_remote_x >= remote_max_x - 20 && delta_x > 3 {
+                        println!("🔙 Return detected: right edge of remote, moving right");
                         true
                     }
                     else { false }
                 } else { false };
                 
                 if should_return {
-                    println!("🔙 Returning control to local");
+                    println!("🔙 Returning control to local after {}ms", elapsed);
                     *CONTROL_ACTIVE.write().unwrap() = false;
+                    *NEEDS_POS_INIT.write().unwrap() = true;  // Reset for next time
                     send_control_message("control_end", 0, 0).await;
                     
-                    // Find the primary screen (or first one) for return position
+                    // Move mouse back to center of screen
                     let primary = screens.iter().find(|s| s.is_primary).unwrap_or(&screens[0]);
                     let return_y = primary.y + primary.height / 2;
-                    let return_x = if edge_pos.0 >= total_max_x - 20 { 
+                    let return_x = if edge_pos.0 >= total_max_x - 30 { 
                         total_max_x - 100  // Come back from right
                     } else { 
                         total_min_x + 100  // Come back from left
                     };
                     crate::input::move_mouse(return_x, return_y);
+                    println!("🔙 Moved local mouse to ({}, {})", return_x, return_y);
                 } else {
                     // Clamp to remote screen bounds
                     let clamped_x = new_remote_x.clamp(remote_min_x, remote_max_x - 1);
@@ -939,16 +1026,12 @@ pub async fn start_mouse_tracking() {
                     // Send to remote
                     send_mouse_to_remote(clamped_x, clamped_y).await;
                 }
-                
-                // NOTE: We no longer try to move mouse back to edge
-                // Instead we track delta from last position
             }
         } else {
             // Not controlling - check for edge transition
-            if mx != last_pos.0 || my != last_pos.1 {
-                last_pos = (mx, my);
-                check_edge_transition(mx, my, edge_threshold).await;
-            }
+            // Also update last_pos so it's ready when control starts
+            *LAST_MOUSE_POS.write().unwrap() = (mx, my);
+            check_edge_transition(mx, my, edge_threshold).await;
         }
     }
 }
@@ -1065,11 +1148,14 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     
     // Take control of remote
     *CONTROL_ACTIVE.write().unwrap() = true;
+    *NEEDS_POS_INIT.write().unwrap() = true;  // Force position reinitialization
     
     // Send control_start message
+    println!("📤 About to send control_start to remote...");
     send_control_message("control_start", remote_x, remote_y).await;
+    println!("✅ control_start sent, we are now controlling remote");
     
-    // Move local mouse to edge position
+    // Move local mouse to edge position (keep it at edge while controlling)
     crate::input::move_mouse(edge_x, edge_y);
 }
 

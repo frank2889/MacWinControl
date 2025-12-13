@@ -85,7 +85,11 @@ mod platform {
                 CGMouseButton::Left,
             ) {
                 event.post(CGEventTapLocation::HID);
+            } else {
+                println!("⚠️ [macOS] Failed to create mouse move event for ({}, {})", x, y);
             }
+        } else {
+            println!("⚠️ [macOS] Failed to create CGEventSource for mouse move");
         }
     }
 

@@ -233,8 +233,13 @@ fn set_screen_layout(remote_edge: String) -> Result<(), String> {
     if !valid_edges.contains(&remote_edge.as_str()) {
         return Err(format!("Invalid edge: {}. Must be one of: {:?}", remote_edge, valid_edges));
     }
-    *network::REMOTE_EDGE.write().unwrap() = remote_edge.clone();
-    println!("📐 Screen layout updated: Windows is to the {} of Mac", remote_edge);
+    
+    // Only log if edge actually changed
+    let current = network::REMOTE_EDGE.read().unwrap().clone();
+    if current != remote_edge {
+        *network::REMOTE_EDGE.write().unwrap() = remote_edge.clone();
+        println!("📐 Screen layout updated: Windows is to the {} of Mac", remote_edge);
+    }
     Ok(())
 }
 
