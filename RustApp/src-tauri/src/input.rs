@@ -27,16 +27,13 @@ mod platform {
     extern "C" {
         fn CGDisplayHideCursor(display: u32) -> i32;
         fn CGDisplayShowCursor(display: u32) -> i32;
-        fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
     }
 
     /// Hide the mouse cursor (when controlling remote)
     pub fn hide_cursor() {
         unsafe {
-            // Disassociate mouse movement from cursor position
-            // This allows us to track delta without moving the visible cursor
-            CGAssociateMouseAndMouseCursorPosition(false);
-            // Hide the cursor
+            // Only hide the cursor visually - do NOT use CGAssociateMouseAndMouseCursorPosition
+            // because that breaks mouse position tracking which we need for delta calculation
             CGDisplayHideCursor(CGDisplay::main().id);
             println!("🙈 Cursor hidden");
         }
@@ -47,8 +44,6 @@ mod platform {
         unsafe {
             // Show the cursor
             CGDisplayShowCursor(CGDisplay::main().id);
-            // Re-associate mouse movement with cursor position
-            CGAssociateMouseAndMouseCursorPosition(true);
             println!("👁️ Cursor shown");
         }
     }
