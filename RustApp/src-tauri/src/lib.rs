@@ -247,13 +247,6 @@ fn get_debug_info() -> DebugInfoResponse {
         last_update: debug.last_update,
     }
 }
-        mouse_x: debug.mouse_x,
-        mouse_y: debug.mouse_y,
-        screen_bounds: debug.screen_bounds,
-        edge_status: debug.edge_status,
-        last_update: debug.last_update,
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
