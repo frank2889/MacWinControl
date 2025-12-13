@@ -22,6 +22,37 @@ mod platform {
     use core_graphics::geometry::CGPoint;
     use core_graphics::display::{CGDisplay, CGGetActiveDisplayList};
 
+    // Import for cursor hiding
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGDisplayHideCursor(display: u32) -> i32;
+        fn CGDisplayShowCursor(display: u32) -> i32;
+        fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
+    }
+
+    /// Hide the mouse cursor (when controlling remote)
+    pub fn hide_cursor() {
+        unsafe {
+            // Disassociate mouse movement from cursor position
+            // This allows us to track delta without moving the visible cursor
+            CGAssociateMouseAndMouseCursorPosition(false);
+            // Hide the cursor
+            CGDisplayHideCursor(CGDisplay::main().id);
+            println!("🙈 Cursor hidden");
+        }
+    }
+
+    /// Show the mouse cursor (when returning to local control)
+    pub fn show_cursor() {
+        unsafe {
+            // Show the cursor
+            CGDisplayShowCursor(CGDisplay::main().id);
+            // Re-associate mouse movement with cursor position
+            CGAssociateMouseAndMouseCursorPosition(true);
+            println!("👁️ Cursor shown");
+        }
+    }
+
     pub fn get_screen_size() -> (i32, i32) {
         let display = CGDisplay::main();
         (display.pixels_wide() as i32, display.pixels_high() as i32)
@@ -141,7 +172,10 @@ mod platform {
 mod platform {
     use super::ScreenInfo;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        ShowCursor,
+    };
     use windows::Win32::Foundation::{POINT, RECT, BOOL, LPARAM};
     use windows::Win32::Graphics::Gdi::*;
 
@@ -334,6 +368,24 @@ mod platform {
             unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32); }
         }
     }
+
+    pub fn hide_cursor() {
+        unsafe {
+            // ShowCursor decrements counter, cursor hidden when < 0
+            // Loop until we actually hide it
+            while ShowCursor(false) >= 0 {}
+        }
+        println!("🙈 Windows cursor hidden");
+    }
+
+    pub fn show_cursor() {
+        unsafe {
+            // ShowCursor increments counter, cursor shown when >= 0
+            // Loop until we actually show it
+            while ShowCursor(true) < 0 {}
+        }
+        println!("👁️ Windows cursor shown");
+    }
 }
 
 // ============= Fallback =============
@@ -353,6 +405,8 @@ mod platform {
     pub fn mouse_click(_button: &str, _action: &str) {}
     pub fn key_event(_key_code: u32, _action: &str) {}
     pub fn scroll(_delta_x: i32, _delta_y: i32) {}
+    pub fn hide_cursor() {}
+    pub fn show_cursor() {}
 }
 
 pub use platform::*;

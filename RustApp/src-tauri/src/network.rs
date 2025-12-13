@@ -418,6 +418,9 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
             *BEING_CONTROLLED.write().unwrap() = true;
             println!("🎮 BEING_CONTROLLED set to TRUE");
             
+            // Hide cursor on the controlled machine
+            crate::input::hide_cursor();
+            
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
                 // Clamp to valid screen coordinates
                 let screens = crate::input::get_all_screens();
@@ -447,6 +450,10 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
             println!("🔓 CONTROL_END: Remote released control");
             *BEING_CONTROLLED.write().unwrap() = false;
             println!("🔓 BEING_CONTROLLED set to FALSE");
+            
+            // Show cursor again on the controlled machine
+            crate::input::show_cursor();
+            
             println!("🔓 =============================================");
         }
         "layout_sync" => {
@@ -780,6 +787,10 @@ async fn start_heartbeat() {
                     *IS_OUTGOING_CONNECTION.write().unwrap() = false;
                     *CONTROL_ACTIVE.write().unwrap() = false;
                     *BEING_CONTROLLED.write().unwrap() = false;
+                    
+                    // Make sure cursor is visible again after disconnect
+                    crate::input::show_cursor();
+                    
                     println!("🔌 Connection state cleared, waiting for reconnection...");
                 }
             }
@@ -1094,6 +1105,9 @@ pub async fn start_mouse_tracking() {
                     *NEEDS_POS_INIT.write().unwrap() = true;  // Reset for next time
                     send_control_message("control_end", 0, 0).await;
                     
+                    // Show cursor again on the controlling machine
+                    crate::input::show_cursor();
+                    
                     // Move mouse back to center of screen
                     let primary = screens.iter().find(|s| s.is_primary).unwrap_or(&screens[0]);
                     let return_y = primary.y + primary.height / 2;
@@ -1243,6 +1257,9 @@ async fn check_edge_transition(mx: i32, my: i32, threshold: i32) {
     *CONTROL_ACTIVE.write().unwrap() = true;
     *NEEDS_POS_INIT.write().unwrap() = true;  // Force position reinitialization
     
+    // Hide cursor on the controlling machine
+    crate::input::hide_cursor();
+    
     // Send control_start message
     println!("📤 About to send control_start to remote...");
     send_control_message("control_start", remote_x, remote_y).await;
@@ -1346,6 +1363,7 @@ pub async fn send_click_to_remote(button: &str, action: &str) {
 #[allow(dead_code)]
 pub fn release_control() {
     *CONTROL_ACTIVE.write().unwrap() = false;
+    crate::input::show_cursor();
     println!("🔓 Control released back to local");
 }
 
