@@ -478,13 +478,25 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
             }
         }
         "mouse_click" => {
+            let being_controlled = *BEING_CONTROLLED.read().unwrap();
             if let (Some(button), Some(action)) = (&msg.button, &msg.action) {
-                crate::input::mouse_click(button, action);
+                if being_controlled {
+                    println!("🖱️ Mouse click received: {} {}", button, action);
+                    crate::input::mouse_click(button, action);
+                } else {
+                    println!("⚠️ mouse_click ignored: BEING_CONTROLLED=false");
+                }
             }
         }
         "key_event" => {
+            let being_controlled = *BEING_CONTROLLED.read().unwrap();
             if let (Some(key_code), Some(action)) = (msg.key_code, &msg.action) {
-                crate::input::key_event(key_code, action);
+                if being_controlled {
+                    println!("⌨️ Key event received: {} {}", key_code, action);
+                    crate::input::key_event(key_code, action);
+                } else {
+                    println!("⚠️ key_event ignored: BEING_CONTROLLED=false");
+                }
             }
         }
         _ => {
@@ -652,7 +664,84 @@ pub async fn start_auto_discovery() -> Result<(), Box<dyn std::error::Error + Se
         start_heartbeat().await;
     });
     
+    // Start input event listener for mouse clicks and keyboard
+    std::thread::spawn(|| {
+        start_input_event_listener();
+    });
+    
     Ok(())
+}
+
+/// Listen for mouse clicks and keyboard events, forward them when controlling remote
+fn start_input_event_listener() {
+    use rdev::{listen, Event, EventType, Button};
+    
+    println!("🖱️ Starting input event listener for clicks and keyboard...");
+    
+    let callback = move |event: Event| {
+        // Only forward events if we're controlling remote
+        let control_active = *CONTROL_ACTIVE.read().unwrap();
+        if !control_active {
+            return;
+        }
+        
+        match event.event_type {
+            EventType::ButtonPress(button) => {
+                let button_name = match button {
+                    Button::Left => "left",
+                    Button::Right => "right",
+                    Button::Middle => "middle",
+                    _ => return,
+                };
+                println!("🖱️ Mouse button press: {}", button_name);
+                
+                // Send click to remote (use blocking send since we're in sync context)
+                let rt = tokio::runtime::Handle::try_current();
+                if let Ok(handle) = rt {
+                    handle.spawn(async move {
+                        send_click_to_remote_internal(button_name, "press").await;
+                    });
+                }
+            }
+            EventType::ButtonRelease(button) => {
+                let button_name = match button {
+                    Button::Left => "left",
+                    Button::Right => "right",
+                    Button::Middle => "middle",
+                    _ => return,
+                };
+                println!("🖱️ Mouse button release: {}", button_name);
+                
+                let rt = tokio::runtime::Handle::try_current();
+                if let Ok(handle) = rt {
+                    handle.spawn(async move {
+                        send_click_to_remote_internal(button_name, "release").await;
+                    });
+                }
+            }
+            // Keyboard events - skip for now, focus on mouse
+            // EventType::KeyPress(key) => { ... }
+            // EventType::KeyRelease(key) => { ... }
+            _ => {}
+        }
+    };
+    
+    if let Err(error) = listen(callback) {
+        println!("❌ Input event listener error: {:?}", error);
+    }
+}
+
+async fn send_click_to_remote_internal(button: &str, action: &str) {
+    let writer = { WRITE_STREAM.read().unwrap().clone() };
+    
+    if let Some(writer) = writer {
+        let msg = Message::mouse_click(button, action);
+        let json = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+        let mut stream = writer.lock().await;
+        if let Err(e) = stream.write_all(json.as_bytes()).await {
+            println!("❌ Failed to send mouse click: {}", e);
+        }
+    }
 }
 
 /// Send periodic ping to keep connection alive and detect disconnects
@@ -1025,6 +1114,10 @@ pub async fn start_mouse_tracking() {
                     
                     // Send to remote
                     send_mouse_to_remote(clamped_x, clamped_y).await;
+                    
+                    // IMPORTANT: Lock local mouse back to edge position
+                    // This prevents the mouse from moving freely on Mac while controlling Windows
+                    crate::input::move_mouse(edge_pos.0, edge_pos.1);
                 }
             }
         } else {

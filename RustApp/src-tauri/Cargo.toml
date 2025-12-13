@@ -23,6 +23,7 @@ arboard = "3"  # Cross-platform clipboard
 lazy_static = "1.4"
 hostname = "0.4"
 once_cell = "1.19"
+rdev = "0.5"  # Cross-platform input event listening (mouse clicks, keyboard)
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
