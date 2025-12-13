@@ -310,7 +310,11 @@ async fn handle_message(
         }
         "mouse_move" => {
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
-                crate::input::move_mouse(x, y);
+                // Only move if we're being controlled by remote
+                let being_controlled = *BEING_CONTROLLED.read().unwrap();
+                if being_controlled {
+                    crate::input::move_mouse(x, y);
+                }
             }
         }
         "mouse_click" => {
@@ -369,7 +373,24 @@ async fn handle_message(
             // Move mouse to the specified position
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
                 println!("🖱️ Moving mouse to ({}, {})", x, y);
-                crate::input::move_mouse(x, y);
+                // Clamp to valid screen coordinates
+                let screens = crate::input::get_all_screens();
+                let min_x = screens.iter().map(|s| s.x).min().unwrap_or(0);
+                let max_x = screens.iter().map(|s| s.x + s.width).max().unwrap_or(1920);
+                let min_y = screens.iter().map(|s| s.y).min().unwrap_or(0);
+                let max_y = screens.iter().map(|s| s.y + s.height).max().unwrap_or(1080);
+                
+                let clamped_x = x.clamp(min_x, max_x - 1);
+                let clamped_y = y.clamp(min_y, max_y - 1);
+                
+                println!("   Screen bounds: x={}-{}, y={}-{}", min_x, max_x, min_y, max_y);
+                println!("   Clamped position: ({}, {})", clamped_x, clamped_y);
+                
+                crate::input::move_mouse(clamped_x, clamped_y);
+                
+                // Verify the move worked
+                let (actual_x, actual_y) = crate::input::get_mouse_position();
+                println!("   Actual position after move: ({}, {})", actual_x, actual_y);
             }
         }
         "control_end" => {
@@ -426,7 +447,11 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
         }
         "mouse_move" => {
             if let (Some(x), Some(y)) = (msg.x, msg.y) {
-                crate::input::move_mouse(x, y);
+                // Only move if we're being controlled by remote
+                let being_controlled = *BEING_CONTROLLED.read().unwrap();
+                if being_controlled {
+                    crate::input::move_mouse(x, y);
+                }
             }
         }
         "mouse_click" => {
@@ -444,7 +469,9 @@ async fn handle_message_simple(msg: &Message) -> Result<(), Box<dyn std::error::
         }
     }
     Ok(())
-}pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStream>>, Box<dyn std::error::Error + Send + Sync>> {
+}
+
+pub async fn connect_to_server(ip: &str, port: u16) -> Result<Arc<Mutex<TcpStream>>, Box<dyn std::error::Error + Send + Sync>> {
     let stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
     println!("Connected to {}:{}", ip, port);
     
